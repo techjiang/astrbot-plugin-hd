@@ -494,17 +494,44 @@ def test_resolve_data_dir_honours_astrbot_root(tmp_path, monkeypatch):
 
     fake_root = tmp_path / "elsewhere"
     fake = types.ModuleType("astrbot.core.utils.astrbot_path")
-    fake.get_astrbot_data_path = lambda: str(fake_root / "data")  # type: ignore[attr-defined]
+    fake.get_astrbot_plugin_data_path = lambda: str(  # type: ignore[attr-defined]
+        fake_root / "data" / "plugin_data"
+    )
     monkeypatch.setitem(sys.modules, "astrbot.core.utils.astrbot_path", fake)
 
     resolved = plugin_main.resolve_data_dir()
-    assert resolved == fake_root / "data" / plugin_main.DATA_SUBDIR_NAME
+    assert resolved == fake_root / "data" / "plugin_data" / plugin_main.PLUGIN_NAME
+
+
+def test_resolve_data_dir_uses_plugin_data_subdir(tmp_path, monkeypatch):
+    """落点必须在 ``data/plugin_data/<插件名>`` 下（AstrBot 上架规范）。
+
+    回归背景：第一版修复只取了 ``get_astrbot_data_path()``（到 ``data`` 为止），
+    数据落成 ``<root>/data/<插件名>``，插件市场上架的安全检测会以
+    「数据持久化位置不规范」拒绝。
+    """
+    import sys
+    import types
+
+    fake_root = tmp_path / "astrbot"
+    fake = types.ModuleType("astrbot.core.utils.astrbot_path")
+    fake.get_astrbot_plugin_data_path = lambda: str(  # type: ignore[attr-defined]
+        fake_root / "data" / "plugin_data"
+    )
+    monkeypatch.setitem(sys.modules, "astrbot.core.utils.astrbot_path", fake)
+
+    resolved = plugin_main.resolve_data_dir()
+    assert resolved.name == "astrbot_plugin_hudong"
+    assert resolved.parent.name == "plugin_data"
+    assert resolved.parent.parent.name == "data"
+    assert "plugin_data" in resolved.parts
 
 
 def test_resolve_data_dir_falls_back_without_astrbot(tmp_path, monkeypatch):
-    """拿不到 AstrBot 路径工具时回退到旧约定，保证独立脚本能跑。"""
+    """拿不到 AstrBot 路径工具时回退，且回退路径同样合规。"""
     import sys
 
     monkeypatch.setitem(sys.modules, "astrbot.core.utils.astrbot_path", None)
     resolved = plugin_main.resolve_data_dir()
-    assert resolved == Path("data") / plugin_main.DATA_SUBDIR_NAME
+    assert resolved == Path("data") / "plugin_data" / plugin_main.PLUGIN_NAME
+    assert "plugin_data" in resolved.parts

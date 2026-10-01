@@ -74,31 +74,34 @@ COMMAND_NAMES: tuple[str, ...] = (
     "投",
 )
 
-# 数据目录名（AstrBot 的 data 目录之下）。
-# 注意这里只存"名字"，真正的根目录由 resolve_data_dir() 动态解析 ——
-# AstrBot 的根目录取 ``ASTRBOT_ROOT`` 环境变量，缺省是 ``os.getcwd()``，
-# 直接写相对路径 Path("data") 在「环境变量指定了别处」或「从别处启动」时会落错地方。
-DATA_SUBDIR_NAME = "astrbot_plugin_hudong"
+# 插件标识，同时用作 ``data/plugin_data/<插件名>`` 下的数据子目录名。
+# 必须与 ``metadata.yaml`` 的 ``name`` 保持一致。
+PLUGIN_NAME = "astrbot_plugin_hudong"
 
 
 def resolve_data_dir() -> Path:
-    """解析插件的运行时数据目录。
+    """解析插件的运行时数据目录，固定为 ``data/plugin_data/<plugin_name>``。
 
-    优先用 AstrBot 官方的 ``get_astrbot_data_path()``（它会正确处理
-    ``ASTRBOT_ROOT``）；拿不到时退回「以当前工作目录为 AstrBot 根」的
-    约定，与旧行为保持一致，保证单测与独立脚本也能跑。
+    AstrBot 上架规范要求插件把持久化数据放在 ``data/plugin_data/<插件名>`` 下，
+    以便插件升级时随 ``plugin_data`` 一起迁移、并便于审计。因此这里**不能**
+    直接拼 ``get_astrbot_data_path()``（那只到 ``data`` 这一层）。
+
+    优先调用官方接口 ``get_astrbot_plugin_data_path()``（它返回
+    ``<astrbot_root>/data/plugin_data``，且已正确处理 ``ASTRBOT_ROOT``），
+    再拼上插件名；接口不可用时（老版本 AstrBot 或脱离框架运行）回退到
+    同构的相对路径 ``data/plugin_data/<插件名>`` —— 两条分支落点一致且都合规。
 
     Returns:
-        形如 ``<astrbot_root>/data/astrbot_plugin_hudong`` 的绝对或相对路径。
+        形如 ``<astrbot_root>/data/plugin_data/astrbot_plugin_hudong`` 的路径。
     """
     try:
-        from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+        from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
-        root = Path(get_astrbot_data_path())
+        root = Path(get_astrbot_plugin_data_path())
     except Exception:
-        # 老版本 AstrBot 或脱离框架运行时：沿用相对路径
-        root = Path("data")
-    return root / DATA_SUBDIR_NAME
+        # 老版本 AstrBot 或脱离框架运行时：回退到同构的相对路径
+        root = Path("data") / "plugin_data"
+    return root / PLUGIN_NAME
 
 
 # 猜数字/接龙局状态 TTL，超过即视为过期

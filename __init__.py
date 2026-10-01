@@ -6,6 +6,6 @@ AstrBot 会把插件目录本身作为 Python 包导入，因此这里显式声�
 
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __author__ = "科技酱"
 __all__ = ["__version__", "__author__"]

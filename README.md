@@ -8,7 +8,7 @@
 
 让群聊真正热闹起来的一站式玩法合集
 
-[![version](https://img.shields.io/badge/version-v1.0.0-4f7cff)](./metadata.yaml)
+[![version](https://img.shields.io/badge/version-v1.0.1-4f7cff)](./metadata.yaml)
 [![astrbot](https://img.shields.io/badge/AstrBot-%3E%3D4.10%2C%20%3C5-22c55e)](https://astrbot.app)
 [![python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)](./pyproject.toml)
 [![deps](https://img.shields.io/badge/第三方依赖-0-ff9800)](./requirements.txt)
@@ -112,7 +112,8 @@ AstrBot 侧所需的一切（`astrbot.api.*`）都由 AstrBot 自身提供，
 
 ## 数据与迁移
 
-数据落在 AstrBot 工作目录下的 `data/astrbot_plugin_hudong/<平台>_<会话>.json`，
+数据落在 AstrBot 的插件数据目录
+`<AstrBot 根目录>/data/plugin_data/astrbot_plugin_hudong/<平台>_<会话>.json`，
 一个群一个文件：
 
 ```json
@@ -123,6 +124,7 @@ AstrBot 侧所需的一切（`astrbot.api.*`）都由 AstrBot 自身提供，
 }
 ```
 
+- 遵循 AstrBot 上架规范，放在 `data/plugin_data/<插件名>/` 下，随插件升级一起迁移
 - 整目录拷走即可迁移
 - 写入是「节流 3 秒 + 合并 + 卸载强制刷盘」，使用 `mkstemp` → `fsync` → `os.replace`
 - 文件权限 `0640`，同组运维账号可读可备份
