@@ -35,14 +35,41 @@
 - **不阻塞事件循环** —— 序列化与写盘都在线程池，`fsync` + 原子替换保证不写坏文件
 - **配置可视化** —— 15 个配置分组全部能在 WebUI 里可视化调整
 - **数值经得起推敲** —— 抽奖期望、打劫期望都做过收敛，不存在刷分漏洞
-- **117 项单测 + 51 项真实框架冒烟** —— 每次改动都会跑
+- **120 项单测 + 51 项真实框架冒烟** —— 每次改动都会跑
+
+## 环境要求
+
+| 项 | 要求 |
+| --- | --- |
+| AstrBot | `>=4.10,<5`（`metadata.yaml` 的 `astrbot_version`） |
+| Python | `>=3.10`（`pyproject.toml` 的 `requires-python`） |
+| 第三方依赖 | **无** |
+
+AstrBot 侧所需的一切（`astrbot.api.*`）都由 AstrBot 自身提供，
+所以插件本身**不需要 `pip install` 任何东西**。
 
 ## 快速开始
 
-1. 把仓库克隆/下载到 AstrBot 的 `data/plugins/` 下，目录名保持
-   `astrbot_plugin_hudong`（插件源码就在仓库根目录，不要把 `astrbot_plugin_hudong/`
-   再套一层）
-2. 重启 AstrBot，或在 WebUI 里重载插件
+1. 把本仓库克隆/下载到 AstrBot 的 `data/plugins/` 下，目录名用
+   `astrbot_plugin_hudong`：
+
+   ```bash
+   cd /path/to/astrbot/data/plugins
+   git clone https://cnb.cool/asoe/TechSauce/astrbot-plugin-hd.git astrbot_plugin_hudong
+   ```
+
+   > 仓库名是 `astrbot-plugin-hd`，插件名是 `astrbot_plugin_hudong`
+   > （`metadata.yaml` 的 `name`），两者不同。AstrBot 以**目录名**拼出
+   > 模块路径（`data.plugins.<目录名>.main`），所以目录名建议与
+   > `metadata.yaml` 的 `name` 保持一致，避免 WebUI 里显示的名字、
+   > 配置文件 `<目录名>_config.json` 与别的插件混淆。
+   >
+   > 另外，`data/plugins/` 的父目录会被 AstrBot 加进 `sys.path`，
+   > 含连字符的目录名 `astrbot-plugin-hd` 虽然能 import，
+   > 但不是合法的 Python 标识符，调试、静态检查与部分工具会踩坑。
+   >
+   > **仓库根目录就是插件目录**，不要再套一层同名子目录。
+2. 重启 AstrBot，或在 WebUI 里点「重载插件」
 3. 群里发送 `/互动` 查看玩法总览
 
 ```
@@ -107,7 +134,7 @@
 pip install ruff pytest pytest-asyncio
 
 ruff format . && ruff check .      # 代码风格
-python -m pytest tests -q          # 117 项单元/集成测试
+python -m pytest tests -q          # 120 项单元/集成测试
 python tools/e2e_smoke.py          # 真实 AstrBot 框架下的 51 项冒烟测试
 python tools/build_logo.py assets/design-source.png assets   # 重新生成 logo 资源
 ```
@@ -131,7 +158,15 @@ favicon、文档横幅（`banner.png`）与社交预览图，全部由 `tools/bu
 python tools/build_logo.py assets/design-source.png assets
 ```
 
-生成逻辑在 `tools/logo_tools.py`，配套单测见 `tests/test_logo_tools.py`。
+这条命令除了写 `assets/`，还会把结果再写一份到**仓库根目录的 `logo.png`**
+（AstrBot 只认这个位置）。生成是确定性的：同一份设计稿重跑不会产生 diff。
+
+> 重建素材需要 **Pillow**，它只是开发期依赖（`astrbot` 本身就依赖它）。
+> 插件运行**不需要** Pillow，`tools/` 目录也不会被打进运行路径。
+
+生成逻辑在 `tools/logo_tools.py`，六边形轮廓由设计稿的白色描边**实测**得出
+（`LEFT_SLOPE` / `RIGHT_SLOPE` 等常量），因此换设计稿只需重新实测这几个数；
+配套单测见 `tests/test_logo_tools.py`（11 项，含「尖角必须保住」的回归用例）。
 
 <br clear="left">
 

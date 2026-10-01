@@ -5,8 +5,9 @@
 #
 # 开发（可选）：
 #   pip install ruff pytest pytest-asyncio
+#   重建 Logo 素材还需要 Pillow（AstrBot 本身依赖它）
 #
 # 质量校验：
 #   ruff format . && ruff check .      # 代码风格
-#   python -m pytest tests -q          # 109 项单元/集成测试
+#   python -m pytest tests -q          # 122 项单元/集成测试
 #   python tools/e2e_smoke.py          # 真实 AstrBot 框架端的 51 项冒烟测试

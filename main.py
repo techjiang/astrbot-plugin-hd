@@ -74,8 +74,32 @@ COMMAND_NAMES: tuple[str, ...] = (
     "投",
 )
 
-# 数据根目录：AstrBot 的 data 目录下，插件卸载重装不丢数据
-DATA_SUBDIR = Path("data") / "astrbot_plugin_hudong"
+# 数据目录名（AstrBot 的 data 目录之下）。
+# 注意这里只存"名字"，真正的根目录由 resolve_data_dir() 动态解析 ——
+# AstrBot 的根目录取 ``ASTRBOT_ROOT`` 环境变量，缺省是 ``os.getcwd()``，
+# 直接写相对路径 Path("data") 在「环境变量指定了别处」或「从别处启动」时会落错地方。
+DATA_SUBDIR_NAME = "astrbot_plugin_hudong"
+
+
+def resolve_data_dir() -> Path:
+    """解析插件的运行时数据目录。
+
+    优先用 AstrBot 官方的 ``get_astrbot_data_path()``（它会正确处理
+    ``ASTRBOT_ROOT``）；拿不到时退回「以当前工作目录为 AstrBot 根」的
+    约定，与旧行为保持一致，保证单测与独立脚本也能跑。
+
+    Returns:
+        形如 ``<astrbot_root>/data/astrbot_plugin_hudong`` 的绝对或相对路径。
+    """
+    try:
+        from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+        root = Path(get_astrbot_data_path())
+    except Exception:
+        # 老版本 AstrBot 或脱离框架运行时：沿用相对路径
+        root = Path("data")
+    return root / DATA_SUBDIR_NAME
+
 
 # 猜数字/接龙局状态 TTL，超过即视为过期
 GUESS_TTL = 900
@@ -112,7 +136,7 @@ class InteractionPlugin(Star):
             super().__init__(context)
         # AstrBot 会把 AstrBotConfig 传进来；转成普通 dict 以便安全 get
         self.config: dict[str, Any] = dict(config) if config else {}
-        self.store = InteractionStore(DATA_SUBDIR)
+        self.store = InteractionStore(resolve_data_dir())
         self._guesses: dict[str, GuessGame] = {}
         self._chains: dict[str, ChainGame] = {}
         self._cooldown: dict[str, float] = {}

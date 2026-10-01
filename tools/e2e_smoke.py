@@ -171,7 +171,8 @@ class Harness:
 
 async def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="hudong-e2e-"))
-    plugin_main.DATA_SUBDIR = tmp / "data"
+    # 数据目录由 resolve_data_dir() 决定，替换它即可让冒烟测试落进临时目录
+    plugin_main.resolve_data_dir = lambda: tmp / "data"
     plugin = plugin_main.InteractionPlugin(context=None, config=dict(CONFIG))
     await plugin.initialize()
     h = Harness(plugin)

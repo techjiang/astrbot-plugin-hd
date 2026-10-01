@@ -96,7 +96,12 @@ def _fresh_config() -> dict:
 
 @pytest.fixture()
 def plugin(tmp_path, monkeypatch):
-    monkeypatch.setattr(plugin_main, "DATA_SUBDIR", tmp_path / "data")
+    """构造插件实例，并把数据目录指向 tmp_path。
+
+    ``resolve_data_dir()`` 才是真正决定落盘位置的地方，
+    因此这里替换它而不是某个常量。
+    """
+    monkeypatch.setattr(plugin_main, "resolve_data_dir", lambda: tmp_path / "data")
     return plugin_main.InteractionPlugin(context=None, config=_fresh_config())
 
 
@@ -475,3 +480,31 @@ async def test_balance_shows_rank_and_lucky(plugin):
     await run(plugin, "cmd_sign", make_event("签到"))
     out = await run(plugin, "cmd_balance", make_event("积分"))
     assert "本群第" in out and "幸运数字" in out
+
+
+def test_resolve_data_dir_honours_astrbot_root(tmp_path, monkeypatch):
+    """数据目录必须跟随 AstrBot 的根目录，而不是固定写相对路径。
+
+    AstrBot 的根目录取 ``ASTRBOT_ROOT`` 环境变量，缺省才是
+    ``os.getcwd()``。早期实现直接写 ``Path("data") / ...``，
+    在设置了 ``ASTRBOT_ROOT`` 的场景下会把数据落到错误的位置。
+    """
+    import sys
+    import types
+
+    fake_root = tmp_path / "elsewhere"
+    fake = types.ModuleType("astrbot.core.utils.astrbot_path")
+    fake.get_astrbot_data_path = lambda: str(fake_root / "data")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "astrbot.core.utils.astrbot_path", fake)
+
+    resolved = plugin_main.resolve_data_dir()
+    assert resolved == fake_root / "data" / plugin_main.DATA_SUBDIR_NAME
+
+
+def test_resolve_data_dir_falls_back_without_astrbot(tmp_path, monkeypatch):
+    """拿不到 AstrBot 路径工具时回退到旧约定，保证独立脚本能跑。"""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "astrbot.core.utils.astrbot_path", None)
+    resolved = plugin_main.resolve_data_dir()
+    assert resolved == Path("data") / plugin_main.DATA_SUBDIR_NAME

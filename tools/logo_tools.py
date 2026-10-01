@@ -6,22 +6,30 @@
 
 ```
 ┌──────────────────────────────┐
-│     六边形面板 + 机器人图形     │
-│                              │
-│          互动                 │  ← 字标，压在六边形下半部
-│        ╲      ╱              │
-│         ╲    ╱               │  ← 六边形底部的"尖角"被字标遮住
-└──────────╲──╱────────────────┘
-│      Astrbot                 │  ← 需裁掉
+│         ╱‾‾‾‾‾‾‾╲            │
+│        ╱  机器人  ╲           │  ← 六边形面板（白色描边 + 蓝紫渐变）
+│       │    ╱╲     │          │
+│       │    互动    │          │  ← 字标，压在六边形下尖角上
+│        ╲  ╱  ╲   ╱           │
+└─────────╲╱────╲╱────────────┘
+│          Astrbot             │  ← 需裁掉
 │      INTERACTIVE PLUGIN      │
 └──────────────────────────────┘
 ```
 
-难点在于**六边形的下尖角与「Astrbot」文字在源图上重叠**：
-按高度硬截会把尖角切成梯形，用直线补边又会在小尺寸下露出接缝。
-这里的做法是由六边形外描边实测出两条斜边的直线方程，
-再逐列按斜边裁剪：斜边以内保留（尖角自然保住），
-斜边以外清空（压在尖角上的「Astrbot」文字一并去掉）。
+难点在于**六边形的下尖角与「互动」字标、以及更下方的「Astrbot」文字
+在源图上相互重叠**：按固定高度硬截会把尖角切断、也会把字标拦腰截断；
+用估算的斜边补边则会在小尺寸下露出接缝。
+
+这里的做法是**由白色描边实测六条边的直线方程**，再逐列取
+「左右斜边中较靠上的那个」作为底边：
+
+* 斜边以内保留 —— 下尖角自然保住，且尖角上方的「互动」字标完整；
+* 斜边以外清空 —— 压在尖角之外的像素（若有）一并去掉；
+* 底边再与字标下沿取较小值 —— 只切掉字标以下的「Astrbot」文字。
+
+``LEFT_*`` / ``RIGHT_*`` 等常量均由 ``assets/design-source.png`` 实测得出，
+测试里用合成图验证同一套逻辑，因此换设计稿也只需重新实测这几个数。
 """
 
 from __future__ import annotations
@@ -30,15 +38,18 @@ from pathlib import Path
 
 from PIL import Image
 
-# ---- 原图版式（615×615），以下数值均由设计稿实测 ----
+# ---- 原图版式（615×615），以下数值均由设计稿的白色描边实测 ----
 
-# 六边形两条斜边拟合出的直线方程 y = k*x + b（由白描边实测）
-LEFT_SLOPE, LEFT_INTERCEPT = 0.72038, 321.38
-RIGHT_SLOPE, RIGHT_INTERCEPT = -0.78074, 792.41
-# 斜边起止（肩点），区间内为竖直段
-LEFT_SHOULDER_X, RIGHT_SHOULDER_X = 91, 523
-# "互动"字标紫色横条的下沿（含白描边）。字标以下属于 Astrbot 文字区，
-# 由于这段文字正好压在六边形尖角上，需要一并截掉。
+# 六边形下部两条斜边拟合出的直线方程 y = k*x + b
+LEFT_SLOPE, LEFT_INTERCEPT = 0.71921, 319.54
+RIGHT_SLOPE, RIGHT_INTERCEPT = -0.67316, 738.54
+# 六边形上部两条斜边
+TOP_LEFT_SLOPE, TOP_LEFT_INTERCEPT = -0.60328, 219.78
+TOP_RIGHT_SLOPE, TOP_RIGHT_INTERCEPT = 0.65323, -173.59
+# 左右竖直壁的 x 范围（白描边实测），之外即斜边
+LEFT_WALL_X, RIGHT_WALL_X = 94, 520
+# "互动"字标的下沿（含白描边）。字标以下属于 Astrbot 文字区，
+# 由于这段文字正好压在六边形尖角之外，需要一并截掉。
 WORDMARK_BOTTOM = 480
 # 面板轮廓的搜索窗口：略大于六边形，避免把装饰星点算进来
 SEARCH_BOX = (60, 20, 560, 580)
@@ -80,16 +91,33 @@ def clean_edges(im: Image.Image) -> Image.Image:
     return im
 
 
+def panel_bottom(column: int) -> float:
+    """返回六边形面板在第 ``column`` 列的底边 y 坐标。
+
+    左右竖直壁之间取两条下斜边的**较小值**（即靠上的那条）：
+    这样在下尖角附近，底边由斜边决定，尖角不会被切平；
+    而在竖直壁一侧，两条斜边早已落到画外，底边由斜边自然延伸得到。
+
+    Args:
+        column: 原图坐标系下的列号。
+
+    Returns:
+        该列的底边 y（可能超过原图高度，表示该列不受斜边限制）。
+    """
+    left = LEFT_SLOPE * column + LEFT_INTERCEPT
+    right = RIGHT_SLOPE * column + RIGHT_INTERCEPT
+    return min(left, right)
+
+
 def panel_mask(
     size: tuple[int, int], origin: tuple[int, int] = (0, 0), margin: int = 2
 ) -> Image.Image:
     """生成六边形面板的 alpha 遮罩。
 
-    六边形外描边为白色，沿两条斜边可以直接测出轮廓：
-    斜边以内保留，斜边以外置 0。中间竖直段的底部取两条斜边的交点（尖角）。
-
-    之所以不直接按高度硬截，是因为源图上「Astrbot」压在六边形下尖角
-    之上，硬截会把尖角切成梯形；按斜边裁剪则能保住完整轮廓。
+    六边形外描边为白色，沿两条下斜边可以直接测出轮廓：
+    底边以上的像素保留，以下置 0。底边同时与
+    ``WORDMARK_BOTTOM``（「互动」字标下沿）取较小值，
+    确保字标以下的「Astrbot」文字不会带进 Logo。
 
     Args:
         size: 遮罩尺寸。
@@ -104,15 +132,7 @@ def panel_mask(
     cuts = []
     for x in range(width):
         column = x + ox
-        left = LEFT_SLOPE * column + LEFT_INTERCEPT
-        right = RIGHT_SLOPE * column + RIGHT_INTERCEPT
-        if column < LEFT_SHOULDER_X:
-            edge = left
-        elif column > RIGHT_SHOULDER_X:
-            edge = right
-        else:
-            edge = min(left, right)
-        cut = int(edge + margin) - oy
+        cut = int(panel_bottom(column) + margin) - oy
         cut = min(cut, WORDMARK_BOTTOM - oy)
         cuts.append(max(0, min(height, cut)))
 
@@ -142,8 +162,8 @@ def pad_to_square(im: Image.Image, pad_ratio: float = 0.04) -> Image.Image:
 def crop_panel(raw: Image.Image) -> Image.Image:
     """抠出六边形面板（机器人图形 + 互动字标）。
 
-    先用 flood fill 得到面板遮罩，再套用到图像上，
-    这样压在尖角上的「Astrbot」文字会被一并排除。
+    套用 ``panel_mask`` 的轮廓遮罩，斜边以外（含压在尖角外侧的
+    「Astrbot」文字）会被一并排除。
 
     Args:
         raw: 设计稿。
