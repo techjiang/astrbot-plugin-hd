@@ -152,3 +152,53 @@ async def test_concurrent_saves_do_not_corrupt(store: InteractionStore):
     assert len(files) == 1
     data = json.loads(files[0].read_text(encoding="utf-8"))
     assert len(data["users"]) == 50
+
+
+def test_values_of_and_rank_of(store: InteractionStore):
+    for uid, bal in (("a", 10), ("b", 300), ("c", 0), ("d", 50)):
+        store.add_balance("g1", uid, bal)
+    assert sorted(store.values_of("g1", "balance")) == [10, 50, 300]
+    assert store.rank_of("g1", "b", "balance") == 1
+    assert store.rank_of("g1", "d", "balance") == 2
+    assert store.rank_of("g1", "a", "balance") == 3
+    # 0 分（不上榜）与不存在的用户都返回 0
+    assert store.rank_of("g1", "c", "balance") == 0
+    assert store.rank_of("g1", "nobody", "balance") == 0
+    assert store.values_of("g1", "nope") == []
+
+
+def test_rank_of_tolerates_dirty_value(store: InteractionStore):
+    store.get_user("g1", "u1")["balance"] = "abc"
+    assert store.rank_of("g1", "u1", "balance") == 0
+
+
+@pytest.mark.asyncio
+async def test_written_file_is_group_readable(store: InteractionStore):
+    """数据文件权限应是 0640（同组运维可读），不是 mkstemp 的 0600。"""
+    import os
+    import stat
+
+    store.add_balance("g1", "u1", 1)
+    await store.save("g1", force=True)
+    path = next(store.data_dir.glob("*.json"))
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    assert mode == 0o640, oct(mode)
+
+
+@pytest.mark.asyncio
+async def test_close_clears_state(store: InteractionStore):
+    store.add_balance("g1", "u1", 5)
+    await store.close()
+    assert store.stats()["cached_sessions"] == 0
+    assert store.stats()["dirty_sessions"] == 0
+
+
+@pytest.mark.asyncio
+async def test_save_is_idempotent_for_clean_session(store: InteractionStore):
+    """未标脏的会话不会产生写盘。"""
+    store.get_user("g1", "u1")
+    await store.save("g1", force=True)
+    before = next(store.data_dir.glob("*.json")).read_text(encoding="utf-8")
+    await store.save("g1")  # 已落盘，无需再写
+    after = next(store.data_dir.glob("*.json")).read_text(encoding="utf-8")
+    assert before == after

@@ -53,6 +53,9 @@ USER_FIELDS: dict[str, Any] = {
     "quest_date": "",
     "quest_done": [],
     "checkin_reward": 0,
+    "dice_count": 0,
+    "lucky_hit": 0,
+    "lucky_last": "",
 }
 
 
@@ -197,6 +200,10 @@ class InteractionStore:
     def _write_sync(path: Path, payload: str) -> None:
         """原子写入文本文件（在线程池中执行）。
 
+        流程为 ``mkstemp -> chmod -> 写 -> fsync -> os.replace -> fsync(dir)``。
+        最后一步对父目录做 ``fsync``，保证 ``rename`` 本身也落盘，
+        极端断电场景下不会出现「文件没了」的空窗。
+
         Args:
             path: 目标路径。
             payload: 文本内容。
@@ -205,13 +212,23 @@ class InteractionStore:
             dir=str(path.parent), prefix=".tmp_", suffix=".json"
         )
         try:
-            # mkstemp 默认 0600，落盘后放宽到 0644，方便运维查看/备份
-            os.chmod(tmp_name, 0o644)
+            # mkstemp 默认 0600，这里放宽到 0640：同组运维账号可读可备，
+            # 又不像 0644 那样对全机所有用户敞开
+            os.chmod(tmp_name, 0o640)
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as fp:
                 fp.write(payload)
                 fp.flush()
                 os.fsync(fp.fileno())
             os.replace(tmp_name, path)
+            # 目录项本身也刷盘，避免 rename 在崩溃时丢失
+            try:
+                dir_fd = os.open(str(path.parent), os.O_RDONLY)
+            except OSError:
+                return
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
         except BaseException:
             Path(tmp_name).unlink(missing_ok=True)
             raise
@@ -254,10 +271,12 @@ class InteractionStore:
             await self.save(session_key, force=True)
 
     async def close(self) -> None:
-        """刷盘并释放缓存。"""
+        """刷盘并释放缓存（插件卸载/重载时调用）。"""
         await self.flush_all()
         self._cache.clear()
         self._accessed.clear()
+        self._dirty.clear()
+        self._last_flush.clear()
 
     # ------------------------------------------------------------------ 用户档案
 
@@ -373,6 +392,49 @@ class InteractionStore:
                 rows.append((uid, value))
         rows.sort(key=lambda r: (-r[1], r[0]))
         return rows[:limit]
+
+    def values_of(self, session_key: str, by: str = "balance") -> list[int]:
+        """取出会话内某维度的全部非零数值（用于算百分位）。
+
+        Args:
+            session_key: 会话标识。
+            by: 字段名。
+
+        Returns:
+            数值列表。
+        """
+        users = self._load(session_key)["users"]
+        values: list[int] = []
+        for info in users.values():
+            try:
+                value = int(info.get(by, 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                values.append(value)
+        return values
+
+    def rank_of(self, session_key: str, user_id: str, by: str = "balance") -> int:
+        """返回某用户在某维度上的名次（从 1 开始），没数据时返回 0。
+
+        Args:
+            session_key: 会话标识。
+            user_id: 用户 ID。
+            by: 字段名。
+
+        Returns:
+            名次；该用户数值为 0 时返回 0。
+        """
+        user = self.peek_user(session_key, user_id)
+        if not user:
+            return 0
+        try:
+            mine = int(user.get(by, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+        if mine <= 0:
+            return 0
+        return sum(1 for v in self.values_of(session_key, by) if v > mine) + 1
 
     def rename(self, session_key: str, user_id: str, name: str) -> None:
         """记录用户昵称，便于排行榜展示名字。

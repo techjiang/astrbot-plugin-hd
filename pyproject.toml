@@ -8,7 +8,9 @@ license = { text = "MIT" }
 
 [project.urls]
 Homepage = "https://cnb.cool/asoe/TechSauce/astrbot-plugin-hd"
+Repository = "https://cnb.cool/asoe/TechSauce/astrbot-plugin-hd"
 Documentation = "https://docs.asoe.cn"
+Issues = "https://cnb.cool/asoe/TechSauce/astrbot-plugin-hd/-/issues"
 
 [tool.ruff]
 line-length = 88
@@ -18,6 +20,10 @@ exclude = ["__pycache__", ".ruff_cache", ".pytest_cache"]
 [tool.ruff.lint]
 select = ["F", "W", "E", "ASYNC", "C4", "Q", "I", "UP", "B", "SIM", "RET"]
 ignore = ["F403", "F405", "E501", "ASYNC230", "ASYNC240", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# 端到端脚本需要先注册包再导入，无法把 import 提到文件顶部
+"tools/e2e_smoke.py" = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

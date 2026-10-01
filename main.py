@@ -1,19 +1,21 @@
 """互动 —— 新一代群聊互动 AstrBot 插件。
 
 提供签到、积分、转账、抽奖、猜数字、词语接龙、投票、排行榜、
-每日任务、打劫、掷骰、关键词互动等一整套群聊玩法，
-并附带丰富的 WebUI 可视化配置。
+每日任务、打劫、掷骰、幸运数字、魔法八球、扎心、关键词互动等
+一整套群聊玩法，并附带丰富的 WebUI 可视化配置。
 
 数据按「平台 + 群/私聊」会话隔离，原子落盘、不阻塞事件循环。
 
 作者：科技酱
 网站：https://docs.asoe.cn
+仓库：https://cnb.cool/asoe/TechSauce/astrbot-plugin-hd
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import random
 import time
 import uuid
@@ -28,17 +30,21 @@ from . import games
 from .games import ChainGame, GuessGame
 from .store import InteractionStore
 
-# 各指令名与别名。`/指令` 后收到的 message_str 仍包含指令名本身
-# （AstrBot 不会裁剪），因此必须按此表剥离前缀后才能拿到真正的参数。
+# 各指令名与别名。
+# 重要：AstrBot 在唤醒阶段只剥掉 wake_prefix，**不会**剥掉指令名本身，
+# 因此 ``event.message_str`` 里始终带着指令名，必须按此表剥离前缀。
+# 新增带参数指令时，务必把指令名与别名都加进来。
 COMMAND_NAMES: tuple[str, ...] = (
     "互动状态",
     "互动帮助",
     "词语接龙",
-    "投票结果",
     "每日任务",
+    "投票结果",
+    "查看投票",
+    "幸运数字",
+    "魔法八球",
     "猜数字",
     "排行榜",
-    "查看投票",
     "掷骰子",
     "签到",
     "打卡",
@@ -50,10 +56,8 @@ COMMAND_NAMES: tuple[str, ...] = (
     "抽奖",
     "抽卡",
     "猜数",
-    "猜",
     "接龙",
     "投票",
-    "投",
     "领取",
     "领奖",
     "打劫",
@@ -64,6 +68,10 @@ COMMAND_NAMES: tuple[str, ...] = (
     "榜单",
     "任务",
     "互动",
+    "八球",
+    "扎心",
+    "猜",
+    "投",
 )
 
 # 数据根目录：AstrBot 的 data 目录下，插件卸载重装不丢数据
@@ -75,6 +83,12 @@ GUESS_TTL = 900
 POLL_KEEP = 86400
 # 后台清理任务间隔
 CLEAN_INTERVAL = 60
+# 冷却表硬上限，超过则按时间清理
+_COOLDOWN_MAX = 4096
+# 关键词自动回复的规则条数上限，防止配置被填成巨型列表后每消息全量扫描
+_MAX_KEYWORD_RULES = 200
+# 接龙需要「轮到别人」时的提示节流窗口（秒），避免刷屏
+_CHAIN_HINT_COOLDOWN = 5.0
 
 
 class InteractionPlugin(Star):
@@ -102,8 +116,13 @@ class InteractionPlugin(Star):
         self._guesses: dict[str, GuessGame] = {}
         self._chains: dict[str, ChainGame] = {}
         self._cooldown: dict[str, float] = {}
+        self._chain_hint_at: dict[str, float] = {}
         self._cleanup_task: asyncio.Task | None = None
         self._rng = random.Random()
+        # 关键词规则缓存：(规则版本号, 编译结果)
+        self._keyword_cache: tuple[int, list[tuple[str, str, bool]]] | None = None
+        self._keyword_version = 0
+        self._last_rules_signature: str | None = None
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -172,6 +191,23 @@ class InteractionPlugin(Star):
         except (TypeError, ValueError):
             return default
 
+    def _bool(self, *path: str, default: bool = True) -> bool:
+        """读取布尔配置，兼容字符串形式的 ``"false"`` / ``"0"``。
+
+        Args:
+            *path: 配置键路径。
+            default: 默认值。
+
+        Returns:
+            布尔配置值。
+        """
+        value = self._cfg(*path, default=default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() not in {"false", "0", "no", "off", ""}
+        return bool(value)
+
     @property
     def _unit(self) -> str:
         """当前积分单位名称。"""
@@ -193,7 +229,7 @@ class InteractionPlugin(Star):
         return f"{platform}_private_{event.get_sender_id()}"
 
     def _sender(self, event: AstrMessageEvent) -> tuple[str, str]:
-        """返回 ``(用户 ID, 展示昵称)``，并顺带把昵称写进档案。
+        """返回 ``(用户 ID, 展示昵称)``。
 
         Args:
             event: 消息事件。
@@ -214,9 +250,9 @@ class InteractionPlugin(Star):
         Returns:
             拦截原因；通过时返回 ``None``。
         """
-        if not self._cfg("enabled", default=True):
+        if not self._bool("enabled", default=True):
             return "互动插件当前已关闭。"
-        if self._cfg("permission", "group_only", default=True) and not (
+        if self._bool("permission", "group_only", default=True) and not (
             event.get_group_id()
         ):
             return "该玩法仅在群聊中可用哦。"
@@ -231,7 +267,7 @@ class InteractionPlugin(Star):
             return "操作太快啦，稍等一下～"
         self._cooldown[key] = now
         # 防止长期运行后冷却表无限膨胀
-        if len(self._cooldown) > 4096:
+        if len(self._cooldown) > _COOLDOWN_MAX:
             cutoff = now - max(cooldown * 10, 600)
             self._cooldown = {k: v for k, v in self._cooldown.items() if v >= cutoff}
         return None
@@ -268,7 +304,7 @@ class InteractionPlugin(Star):
         for name in sorted(COMMAND_NAMES, key=len, reverse=True):
             if text == name:
                 return ""
-            if text.startswith(name) and text[len(name)] in " \t":
+            if text.startswith(name) and text[len(name)] in " \t\u3000":
                 return text[len(name) :].strip()
         return text
 
@@ -282,7 +318,54 @@ class InteractionPlugin(Star):
         Returns:
             是否启用。
         """
-        return bool(self._cfg(name, "enabled", default=default))
+        return self._bool(name, "enabled", default=default)
+
+    def _dice_params(
+        self, event: AstrMessageEvent, count: int, faces: int
+    ) -> tuple[int, int, str]:
+        """解析掷骰参数，支持 ``3 20`` 与 ``3d20`` 两种写法。
+
+        框架在参数不是合法整数时会把 ``parsed_params`` 丢掉，
+        handler 只会拿到默认值，因此这里必须回退到原始文本再解析一遍，
+        否则 ``/掷骰 abc`` 会静默变成 ``1d6``。
+
+        Args:
+            event: 消息事件。
+            count: 框架解析出的数量（0 表示没解析到）。
+            faces: 框架解析出的面数（0 表示没解析到）。
+
+        Returns:
+            ``(数量, 面数, 提示)``，提示为空表示参数正常。
+        """
+        note = ""
+        if count and faces:
+            return min(max(1, count), 10), min(max(2, faces), 1000), note
+
+        text = self._args(event).strip().lower().replace("d", " d ").split()
+        parsed: list[int] = []
+        for token in text[:2]:
+            try:
+                parsed.append(int(token))
+            except (TypeError, ValueError):
+                note = "参数不是数字，已按 1d6 处理。"
+                return 1, 6, note
+        c = parsed[0] if parsed else 1
+        f = parsed[1] if len(parsed) > 1 else 6
+        c = min(max(1, c), 10)
+        f = min(max(2, f), 1000)
+        return c, f, note
+
+    def _guess_reward(self) -> int:
+        """猜数字奖励：随难度自动缩放，避免「范围开到 100 万仍送 30」的失衡。"""
+        lo = self._int("guess_number", "min", default=1)
+        hi = self._int("guess_number", "max", default=100)
+        lo, hi = games.normalize_range(lo, hi, min_span=1)
+        attempts = max(1, self._int("guess_number", "max_attempts", default=10))
+        base = self._int("guess_number", "reward", default=30)
+        # 用「二分查找的最坏次数」衡量难度，奖励按比例放大
+        optimal = max(1, math.ceil(math.log2(hi - lo + 1)))
+        scale = max(1.0, attempts / optimal)
+        return max(1, int(base * min(scale, 10.0)))
 
     # ------------------------------------------------------------------ 后台维护
 
@@ -303,8 +386,11 @@ class InteractionPlugin(Star):
                     for k, g in self._chains.items()
                     if now - g.started_at < max(180, chain_ttl)
                 }
+                self._chain_hint_at = {
+                    k: v for k, v in self._chain_hint_at.items() if now - v < 60
+                }
                 self.store.prune_polls(POLL_KEEP, now)
-                if len(self._cooldown) > 4096:
+                if len(self._cooldown) > _COOLDOWN_MAX:
                     self._cooldown.clear()
                 await self.store.flush_all()
             except asyncio.CancelledError:
@@ -350,7 +436,7 @@ class InteractionPlugin(Star):
 
     @filter.command("积分", alias={"余额", "balance", "我的"})
     async def cmd_balance(self, event: AstrMessageEvent) -> None:
-        """查询个人积分与统计。"""
+        """查询个人积分、等级、称号与各项统计。"""
         if reason := self._guard(event):
             yield self._deny(reason)
             return
@@ -358,17 +444,22 @@ class InteractionPlugin(Star):
         uid, name = self._sender(event)
         user = self.store.get_user(key, uid)
         user["name"] = name
-        level, inner, need = games.level_of(user)
-        bar = "▰" * (inner * 10 // need) + "▱" * (10 - inner * 10 // need)
+        level, inner, need, total = games.level_of(user)
+        progress = games.bar(inner, need)
         title = user.get("title") or "暂无"
+        balance_rank = self.store.rank_of(key, uid, "balance")
+        rank_text = f"（本群第 {balance_rank} 名）" if balance_rank else "（还没上榜）"
+        lucky = games.lucky_number(games.today_str(), uid)
+        await self.store.save(key)
         yield event.plain_result(
             f"@{name} 你好，\n"
-            f"💰 余额：{user['balance']} {self._unit}\n"
-            f"🏅 等级：Lv.{level}  {bar} {inner}/{need}\n"
+            f"💰 余额：{user['balance']} {self._unit}{rank_text}\n"
+            f"🏅 等级：Lv.{level}  {progress} {inner}/{need}（累计 {total} 经验）\n"
             f"🎖 称号：{title}\n"
             f"📅 累计签到 {user['total_sign']} 天（连签 {user['streak']}，最长 {user['best_streak']}）\n"
             f"🎰 抽奖 {user['lottery_count']} 次｜🎯 猜中 {user['guess_win']} 次｜"
-            f"🔗 接龙 {user['chain_win']} 次｜🥊 打劫 {user['rob_win']} 胜 {user['rob_lose']} 负"
+            f"🔗 接龙 {user['chain_win']} 次｜🥊 打劫 {user['rob_win']} 胜 {user['rob_lose']} 负\n"
+            f"🍀 今日幸运数字：{lucky}"
         )
 
     @filter.command("转账", alias={"转积分", "pay"})
@@ -390,7 +481,12 @@ class InteractionPlugin(Star):
         if not target:
             yield event.plain_result("请指定转账对象，例如：/转账 10001 50")
             return
-        ok, msg = self.store.transfer(key, uid, target, int(amount))
+        try:
+            amount = int(amount)
+        except (TypeError, ValueError):
+            yield event.plain_result("转账数量必须是整数。")
+            return
+        ok, msg = self.store.transfer(key, uid, target, amount)
         if not ok:
             yield event.plain_result(msg)
             return
@@ -454,7 +550,7 @@ class InteractionPlugin(Star):
         yield event.plain_result(
             f"🎯 猜数字开始！范围 {game.low} ~ {game.high}，"
             f"共 {game.max_attempts} 次机会。\n发送「猜 <数字>」来猜，"
-            f"猜中得 {self._int('guess_number', 'reward', default=30)} {self._unit}。"
+            f"猜中得 {self._guess_reward()} {self._unit}。"
         )
 
     @filter.command("猜", alias={"cai"})
@@ -480,11 +576,11 @@ class InteractionPlugin(Star):
             return
 
         uid, name = self._sender(event)
-        result, hint = game.guess(int(number))
+        result, hint = game.guess(int(number), uid)
         if result in ("win", "lose"):
             self._guesses.pop(key, None)
             if result == "win":
-                reward = self._int("guess_number", "reward", default=30)
+                reward = self._guess_reward()
                 user = self.store.get_user(key, uid)
                 user["name"] = name
                 user["guess_win"] = int(user.get("guess_win", 0) or 0) + 1
@@ -507,10 +603,14 @@ class InteractionPlugin(Star):
             return
 
         key = self._session_key(event)
-        # 修正常见错误：event.message_str 含指令名，必须剥掉后再取起始词
+        # 必须剥掉指令名后再取起始词，否则 /接龙 互动 会解析成「接龙」
         arg = self._args(event).strip()
         first = arg.split()[0] if arg else ""
-        if not first or not all("\u4e00" <= ch <= "\u9fff" for ch in first):
+        if (
+            not first
+            or len(first) > 12
+            or not all("\u4e00" <= ch <= "\u9fff" for ch in first)
+        ):
             first = self._rng.choice(
                 ("互动", "科技", "群聊", "开心", "生活", "音乐", "星空")
             )
@@ -530,7 +630,7 @@ class InteractionPlugin(Star):
         Args:
             event: 消息事件。
         """
-        if not self._cfg("enabled", default=True):
+        if not self._bool("enabled", default=True):
             return
         if not self._feature_on("word_chain"):
             return
@@ -548,10 +648,13 @@ class InteractionPlugin(Star):
         word = (event.message_str or "").strip()
         ok, hint = game.submit(word, uid)
         if not ok:
-            # 只有"轮到自己"的玩家才需要收到失败提示
+            # 只有「轮到自己但接错」的玩家会收到提示，且做节流，避免刷屏
             if game.last_user and uid != game.last_user:
-                event.stop_event()
-                yield event.plain_result(hint)
+                now = time.time()
+                last = self._chain_hint_at.get(key, 0.0)
+                if now - last >= _CHAIN_HINT_COOLDOWN:
+                    self._chain_hint_at[key] = now
+                    yield event.plain_result(hint)
             return
 
         game.started_at = time.time()
@@ -562,8 +665,8 @@ class InteractionPlugin(Star):
         user["balance"] = int(user.get("balance", 0) or 0) + reward
         games.bump_daily(user, "chain")
         await self.store.save(key)
-        event.stop_event()
-        yield event.plain_result(f"@{name} {hint}（+{reward} {self._unit}）")
+        flavor = self._rng.choice(games.CHAIN_FLAVORS)
+        yield event.plain_result(f"@{name} {hint}（+{reward} {self._unit}）{flavor}")
 
     # ------------------------------------------------------------------ 投票
 
@@ -577,7 +680,7 @@ class InteractionPlugin(Star):
             yield self._deny("投票功能已关闭。")
             return
 
-        # 修正常见错误：无参数时旧代码 IndexError
+        # 无参数时旧代码会 IndexError，这里先做长度校验
         raw = self._args(event).strip()
         parts = [p.strip() for p in raw.replace("｜", "|").split("|") if p.strip()]
         if len(parts) < 3:
@@ -587,7 +690,7 @@ class InteractionPlugin(Star):
             return
 
         question, options = parts[0], parts[1:]
-        max_options = self._int("vote", "max_options", default=10)
+        max_options = max(2, self._int("vote", "max_options", default=10))
         if len(options) > max_options:
             yield event.plain_result(
                 f"选项最多 {max_options} 个，当前 {len(options)} 个。"
@@ -595,8 +698,8 @@ class InteractionPlugin(Star):
             return
 
         key = self._session_key(event)
-        uid, _ = self._sender(event)
-        duration = self._int("vote", "duration_seconds", default=300)
+        uid, name = self._sender(event)
+        duration = max(30, self._int("vote", "duration_seconds", default=300))
         poll_id = uuid.uuid4().hex[:6]
         poll = {
             "id": poll_id,
@@ -610,7 +713,10 @@ class InteractionPlugin(Star):
         self.store.add_poll(key, poll)
         await self.store.save(key, force=True)
 
-        lines = [f"📊 投票：{question}", f"编号 {poll_id}｜时长 {duration // 60} 分钟"]
+        lines = [
+            f"📊 投票：{question}",
+            f"发起人 @{name}｜编号 {poll_id}｜时长 {games.format_duration(duration)}",
+        ]
         lines += [f"{i}. {opt}" for i, opt in enumerate(poll["options"], 1)]
         lines.append(f"参与方式：/投 {poll_id} <选项序号>")
         yield event.plain_result("\n".join(lines))
@@ -629,12 +735,17 @@ class InteractionPlugin(Star):
             yield self._deny(reason)
             return
         key = self._session_key(event)
-        poll = self.store.polls(key).get(str(poll_id).lstrip("#"))
+        poll = self.store.polls(key).get(str(poll_id).lstrip("#").strip())
         if not poll:
             yield event.plain_result(f"没有找到编号为 {poll_id} 的投票。")
             return
         options = poll.get("options") or []
-        if not (1 <= int(option) <= len(options)):
+        try:
+            option = int(option)
+        except (TypeError, ValueError):
+            yield event.plain_result("选项序号必须是数字。")
+            return
+        if not (1 <= option <= len(options)):
             yield event.plain_result(f"选项序号应为 1 ~ {len(options)}。")
             return
         uid, _ = self._sender(event)
@@ -642,10 +753,10 @@ class InteractionPlugin(Star):
         if uid in votes:
             yield event.plain_result("你已经投过票啦，一人一票哦。")
             return
-        votes[uid] = int(option) - 1
+        votes[uid] = option - 1
         await self.store.save(key, force=True)
         yield event.plain_result(
-            f"✅ 已投票：{options[int(option) - 1]}（当前共 {len(votes)} 票）"
+            f"✅ 已投票：{options[option - 1]}（当前共 {len(votes)} 票）"
         )
 
     @filter.command("投票结果", alias={"查看投票"})
@@ -675,7 +786,7 @@ class InteractionPlugin(Star):
             yield event.plain_result("\n".join(lines))
             return
 
-        poll = polls.get(str(poll_id).lstrip("#"))
+        poll = polls.get(str(poll_id).lstrip("#").strip())
         if not poll:
             yield event.plain_result(f"没有找到编号为 {poll_id} 的投票。")
             return
@@ -686,66 +797,167 @@ class InteractionPlugin(Star):
                 counts[idx] += 1
         total = sum(counts)
         lines = [f"📊 {poll.get('question', '')}（共 {total} 票）"]
+        width = 12
         for i, (opt, cnt) in enumerate(zip(options, counts, strict=False), 1):
             pct = (cnt / total * 100) if total else 0
-            bar = "█" * int(pct / 5)
-            lines.append(f"{i}. {opt} — {cnt} 票 {pct:.1f}% {bar}")
+            lines.append(
+                f"{i}. {opt} — {cnt} 票 {pct:.1f}% {games.bar(cnt, max(1, total), width)}"
+            )
         if total:
             winner = options[counts.index(max(counts))]
             lines.append(f"🏆 当前领先：{winner}")
         yield event.plain_result("\n".join(lines))
 
-    # ------------------------------------------------------------------ 排行榜
+    # ------------------------------------------------------------------ 掷骰 / 打劫
 
-    @filter.command("排行榜", alias={"排行", "rank", "榜单"})
-    async def cmd_rank(self, event: AstrMessageEvent, metric: str = "积分") -> None:
-        """查看本群排行榜。
+    @filter.command("掷骰", alias={"骰子", "dice", "roll"})
+    async def cmd_dice(
+        self, event: AstrMessageEvent, count: int = 0, faces: int = 0
+    ) -> None:
+        """掷骰子。
+
+        支持 ``/掷骰 3 20`` 与 ``NdM`` 两种写法；参数非数字或缺失时
+        回退到 ``1d6``，并会告诉用户实际用了什么。
 
         Args:
-            metric: 排行维度：积分 / 签到 / 抽奖 / 猜中 / 接龙 / 打劫。
+            count: 骰子数量，1~10。
+            faces: 面数，2~1000。
         """
         if reason := self._guard(event):
             yield self._deny(reason)
             return
-        aliases = {
-            "积分": "balance",
-            "余额": "balance",
-            "balance": "balance",
-            "签到": "total_sign",
-            "sign": "total_sign",
-            "抽奖": "lottery_count",
-            "lottery": "lottery_count",
-            "猜中": "guess_win",
-            "guess": "guess_win",
-            "接龙": "chain_win",
-            "chain": "chain_win",
-            "打劫": "rob_win",
-            "rob": "rob_win",
-        }
-        titles = {
-            "balance": "积分",
-            "total_sign": "签到",
-            "lottery_count": "抽奖",
-            "guess_win": "猜中",
-            "chain_win": "接龙",
-            "rob_win": "打劫",
-        }
-        field = aliases.get(str(metric).strip())
+        if not self._feature_on("dice", default=False):
+            yield self._deny("掷骰子功能已关闭。")
+            return
+
+        key = self._session_key(event)
+        uid, name = self._sender(event)
+        count, faces, note = self._dice_params(event, count, faces)
+        rolls, total = games.roll_dice(count, faces, rng=self._rng)
+        user = self.store.get_user(key, uid)
+        user["name"] = name
+        user["dice_count"] = int(user.get("dice_count", 0) or 0) + 1
+        games.bump_daily(user, "dice")
+        await self.store.save(key)
+        detail = games.dice_faces_text(rolls, faces)
+        flavor = self._rng.choice(games.DICE_FLAVORS)
+        tail = f"\n{note}" if note else ""
+        yield event.plain_result(
+            f"{flavor} @{name} {count}d{faces}：{detail} = {total}{tail}"
+        )
+
+    @filter.command("打劫", alias={"抢劫", "rob"})
+    async def cmd_rob(self, event: AstrMessageEvent, target: str, amount: int) -> None:
+        """打劫群友的积分。
+
+        Args:
+            target: 目标用户 ID。
+            amount: 打劫数量（会被自动收敛到安全上限）。
+        """
+        if reason := self._guard(event):
+            yield self._deny(reason)
+            return
+        if not self._feature_on("rob", default=False):
+            yield self._deny("打劫功能已关闭。")
+            return
+
+        key = self._session_key(event)
+        uid, name = self._sender(event)
+        target = str(target).lstrip("@").strip()
+        if target == uid:
+            yield event.plain_result("不能打劫自己哦。")
+            return
+        try:
+            amount = int(amount)
+        except (TypeError, ValueError):
+            yield event.plain_result("打劫数量必须是整数。")
+            return
+        victim = self.store.peek_user(key, target)
+        if victim is None:
+            yield event.plain_result("对方在本群还没有档案，无法打劫。")
+            return
+
+        attacker = self.store.get_user(key, uid)
+        attacker["name"] = name
+        attacker_balance = int(attacker.get("balance", 0) or 0)
+        victim_balance = int(victim.get("balance", 0) or 0)
+        cap = games.rob_max_amount(attacker_balance, victim_balance)
+        ok, delta, msg = games.rob_check(attacker, victim, amount, rng=self._rng)
+        if ok:
+            games.bump_daily(attacker, "rob")
+        await self.store.save(key, force=True)
+        victim_name = self.store.display_name(key, target)
+        tip = ""
+        if cap and amount > cap:
+            tip = f"\n（按安全上限收敛为 {cap}，打劫金额最多是你的余额的 1/6）"
+        yield event.plain_result(
+            f"@{name} {msg}\n目标：{victim_name}（变动 {delta:+d}）{tip}"
+        )
+
+    # ------------------------------------------------------------------ 排行榜
+
+    _RANK_ALIASES: dict[str, str] = {
+        "积分": "balance",
+        "余额": "balance",
+        "balance": "balance",
+        "签到": "total_sign",
+        "sign": "total_sign",
+        "抽奖": "lottery_count",
+        "lottery": "lottery_count",
+        "猜中": "guess_win",
+        "guess": "guess_win",
+        "接龙": "chain_win",
+        "chain": "chain_win",
+        "打劫": "rob_win",
+        "rob": "rob_win",
+        "掷骰": "dice_count",
+        "dice": "dice_count",
+        "幸运": "lucky_hit",
+        "lucky": "lucky_hit",
+    }
+    _RANK_TITLES: dict[str, str] = {
+        "balance": "积分",
+        "total_sign": "签到",
+        "lottery_count": "抽奖",
+        "guess_win": "猜中",
+        "chain_win": "接龙",
+        "rob_win": "打劫",
+        "dice_count": "掷骰",
+        "lucky_hit": "幸运数字命中",
+    }
+
+    @filter.command("排行榜", alias={"排行", "rank", "榜单"})
+    async def cmd_rank(self, event: AstrMessageEvent, metric: str = "") -> None:
+        """查看本群排行榜。
+
+        参数默认值是空字符串而不是「积分」——否则用户输入一个非法维度时，
+        框架会把参数解析失败的值丢弃、用默认值兜底，指令就会「看起来没报错
+        但也没按用户说的做」。这里对「没填」和「填错」分别处理。
+
+        Args:
+            metric: 排行维度，见 ``_RANK_ALIASES``。
+        """
+        if reason := self._guard(event):
+            yield self._deny(reason)
+            return
+        raw = str(metric).strip() or self._args(event).strip()
+        field = self._RANK_ALIASES.get(raw) if raw else "balance"
         if field is None:
-            yield event.plain_result(
-                "可排行维度：积分 / 签到 / 抽奖 / 猜中 / 接龙 / 打劫。例如：/排行榜 签到"
-            )
+            dims = " / ".join(dict.fromkeys(self._RANK_TITLES.values()))
+            yield event.plain_result(f"可排行维度：{dims}。例如：/排行榜 签到")
             return
 
         key = self._session_key(event)
         size = max(3, min(50, self._int("rank", "size", default=10)))
         rows = self.store.top_users(key, by=field, limit=size)
         if not rows:
-            yield event.plain_result(f"本群还没有{titles[field]}数据，快去玩一局吧！")
+            yield event.plain_result(
+                f"本群还没有{self._RANK_TITLES[field]}数据，快去玩一局吧！"
+            )
             return
 
         medals = ("🥇", "🥈", "🥉")
-        lines = [f"🏆 本群{titles[field]}排行榜（Top {len(rows)}）"]
+        lines = [f"🏆 本群{self._RANK_TITLES[field]}排行榜（Top {len(rows)}）"]
         for i, (uid, value) in enumerate(rows):
             prefix = medals[i] if i < 3 else f"{i + 1:>2}."
             unit = f" {self._unit}" if field == "balance" else ""
@@ -772,7 +984,8 @@ class InteractionPlugin(Star):
             target = quest["target"]
             mark = "✅" if claimed else ("🎁" if done_count >= target else "⏳")
             lines.append(
-                f"{mark} {quest['desc']}（{done_count}/{target}）→ {quest['reward']} {self._unit}"
+                f"{mark} {quest['desc']}（{done_count}/{target}）"
+                f"→ {quest['reward']} {self._unit}"
             )
         lines.append("完成任意任务后发送「/领取 <任务名>」领取奖励。")
         lines.append("任务名：" + " / ".join(q[0]["code"] for q in progress))
@@ -781,7 +994,7 @@ class InteractionPlugin(Star):
 
     @filter.command("领取", alias={"领奖", "claim"})
     async def cmd_claim(self, event: AstrMessageEvent) -> None:
-        """领取每日任务奖励。"""
+        """领取每日任务奖励；不带参数时一键领取所有可领任务。"""
         if reason := self._guard(event):
             yield self._deny(reason)
             return
@@ -792,7 +1005,6 @@ class InteractionPlugin(Star):
         code = self._args(event).strip().split()[0] if self._args(event).strip() else ""
 
         if not code:
-            # 不带参数时自动领取所有已完成任务
             claimed, total_reward, notes = 0, 0, []
             for quest, done_count, is_done in games.quest_progress(user):
                 if is_done or done_count < quest["target"]:
@@ -819,90 +1031,120 @@ class InteractionPlugin(Star):
             await self.store.save(key, force=True)
         yield event.plain_result(f"@{name} {msg}")
 
-    # ------------------------------------------------------------------ 打劫 / 掷骰
+    # ------------------------------------------------------------------ 幸运数字 / 八球 / 扎心
 
-    @filter.command("打劫", alias={"抢劫", "rob"})
-    async def cmd_rob(self, event: AstrMessageEvent, target: str, amount: int) -> None:
-        """打劫群友的积分。
+    @filter.command("幸运数字", alias={"幸运", "lucky"})
+    async def cmd_lucky(self, event: AstrMessageEvent, guess: str = "") -> None:
+        """查看今日幸运数字，或检验自己的数字是否命中。
 
         Args:
-            target: 目标用户 ID。
-            amount: 打劫数量。
+            guess: 可选，要检验的数字。
         """
         if reason := self._guard(event):
             yield self._deny(reason)
             return
-        if not self._feature_on("rob", default=False):
-            yield self._deny("打劫功能已关闭。")
+        if not self._feature_on("lucky"):
+            yield self._deny("幸运数字已关闭。")
             return
-
         key = self._session_key(event)
         uid, name = self._sender(event)
-        target = str(target).lstrip("@").strip()
-        if target == uid:
-            yield event.plain_result("不能打劫自己哦。")
-            return
-        victim = self.store.peek_user(key, target)
-        if victim is None:
-            yield event.plain_result("对方在本群还没有档案，无法打劫。")
-            return
-
-        attacker = self.store.get_user(key, uid)
-        attacker["name"] = name
-        ok, delta, msg = games.rob_check(attacker, victim, int(amount), rng=self._rng)
-        if ok:
-            games.bump_daily(attacker, "rob")
-        await self.store.save(key, force=True)
-        victim_name = self.store.display_name(key, target)
-        yield event.plain_result(f"@{name} {msg}\n目标：{victim_name}（{delta:+d}）")
-
-    @filter.command("掷骰", alias={"骰子", "dice", "roll"})
-    async def cmd_dice(
-        self, event: AstrMessageEvent, count: int = 1, faces: int = 6
-    ) -> None:
-        """掷骰子。
-
-        Args:
-            count: 骰子数量，1~10。
-            faces: 面数，2~1000。
-        """
-        if reason := self._guard(event):
-            yield self._deny(reason)
-            return
-        if not self._feature_on("dice", default=False):
-            yield self._deny("掷骰子功能已关闭。")
-            return
-
-        key = self._session_key(event)
-        uid, name = self._sender(event)
-        rolls, total = games.roll_dice(count, faces, rng=self._rng)
+        today = games.today_str()
+        lucky = games.lucky_number(today, uid)
+        arg = guess or self._args(event).strip()
         user = self.store.get_user(key, uid)
         user["name"] = name
-        user["dice_count"] = int(user.get("dice_count", 0) or 0) + 1
-        games.bump_daily(user, "dice")
-        await self.store.save(key)
-        detail = " + ".join(str(r) for r in rolls)
-        yield event.plain_result(f"🎲 @{name} {count}d{faces}：{detail} = {total}")
+
+        if not arg:
+            await self.store.save(key)
+            yield event.plain_result(
+                f"🍀 @{name} 今天的幸运数字是 {lucky}。\n"
+                f"发送「/幸运数字 <你猜的数字>」看看是否命中，"
+                f"命中可获得 {self._int('lucky', 'reward', default=15)} {self._unit}。"
+            )
+            return
+
+        try:
+            value = int(arg)
+        except (TypeError, ValueError):
+            yield event.plain_result("请发送一个 1~100 的整数。")
+            return
+        reward = max(1, self._int("lucky", "reward", default=15))
+        if not games.lucky_hit(today, uid, value):
+            await self.store.save(key)
+            yield event.plain_result(
+                f"@{name} {value} 不是今天的幸运数字，再想想～（每天都可以重新猜一次）"
+            )
+            return
+        if user.get("lucky_last") == today:
+            await self.store.save(key)
+            yield event.plain_result(
+                f"@{name} 你今天已经领过幸运数字奖励啦，明天再来。"
+            )
+            return
+        user["lucky_last"] = today
+        user["lucky_hit"] = int(user.get("lucky_hit", 0) or 0) + 1
+        user["balance"] = int(user.get("balance", 0) or 0) + reward
+        await self.store.save(key, force=True)
+        yield event.plain_result(
+            f"🎉 @{name} 猜对了！今天的幸运数字就是 {lucky}，"
+            f"获得 {reward} {self._unit}。"
+        )
+
+    @filter.command("八球", alias={"魔法八球", "8ball"})
+    async def cmd_eight_ball(self, event: AstrMessageEvent, question: str = "") -> None:
+        """魔法八球：给一个是/否问题一个答案。
+
+        Args:
+            question: 你的问题。
+        """
+        if reason := self._guard(event):
+            yield self._deny(reason)
+            return
+        if not self._feature_on("eight_ball"):
+            yield self._deny("魔法八球已关闭。")
+            return
+        q = question or self._args(event).strip()
+        _, answer = games.eight_ball(q, rng=self._rng)
+        yield event.plain_result(answer)
+
+    @filter.command("扎心", alias={"扎心话", "roast"})
+    async def cmd_roast(self, event: AstrMessageEvent, target: str = "") -> None:
+        """随机来一句扎心文案。
+
+        Args:
+            target: 可选，被扎心的对象（@某人 或 ID）。
+        """
+        if reason := self._guard(event):
+            yield self._deny(reason)
+            return
+        if not self._feature_on("roast"):
+            yield self._deny("扎心文案已关闭。")
+            return
+        arg = (target or self._args(event).strip()).lstrip("@").strip()
+        key = self._session_key(event)
+        _, name = self._sender(event)
+        shown = self.store.display_name(key, arg) if arg else name
+        yield event.plain_result(games.roast(shown, rng=self._rng))
 
     # ------------------------------------------------------------------ 帮助 / 状态
 
     @filter.command("互动", alias={"互动帮助", "hd", "help"})
     async def cmd_help(self, event: AstrMessageEvent) -> None:
         """查看互动插件帮助。"""
-        metric = "积分 / 签到 / 抽奖 / 猜中 / 接龙 / 打劫"
+        dims = " / ".join(dict.fromkeys(self._RANK_TITLES.values()))
         yield event.plain_result(
             "🎮 互动插件 · 玩法总览\n"
             "【日常】\n"
-            "/签到 ｜ /积分 ｜ /每日任务 ｜ /领取\n"
+            "/签到 ｜ /积分 ｜ /每日任务 ｜ /领取 [任务名]\n"
             "【娱乐】\n"
             "/抽奖 ｜ /猜数字 → /猜 <数字> ｜ /接龙 [起始词]\n"
-            "【社交换】\n"
-            f"/转账 <用户> <数量> ｜ /打劫 <用户> <数量>\n"
+            "/掷骰 [数量] [面数] ｜ /幸运数字 [数字] ｜ /八球 <问题>\n"
+            "【社交】\n"
+            "/转账 <用户> <数量> ｜ /打劫 <用户> <数量> ｜ /扎心 [@某人]\n"
             "【工具】\n"
             "/投票 问题 | 选项1 | 选项2 → /投 <编号> <序号> → /投票结果 [编号]\n"
-            "/掷骰 [数量] [面数] ｜ /排行榜 <维度>\n"
-            f"排行维度：{metric}\n"
-            f"当前积分单位：{self._unit}"
+            f"/排行榜 <维度>（{dims}）\n"
+            f"当前积分单位：{self._unit}｜作者：科技酱"
         )
 
     @filter.command("互动状态", alias={"hd状态"})
@@ -914,13 +1156,57 @@ class InteractionPlugin(Star):
         stats = self.store.stats()
         yield event.plain_result(
             "⚙️ 互动插件运行状态\n"
+            f"版本 {self._version()}｜作者 科技酱\n"
             f"缓存会话 {stats['cached_sessions']}｜缓存用户 {stats['cached_users']}\n"
             f"缓存投票 {stats['cached_polls']}｜待落盘 {stats['dirty_sessions']}\n"
-            f"磁盘文件 {stats['disk_files']}｜猜数字局 {len(self._guesses)}｜接龙局 {len(self._chains)}\n"
+            f"磁盘文件 {stats['disk_files']}｜猜数字局 {len(self._guesses)}"
+            f"｜接龙局 {len(self._chains)}\n"
             f"数据目录：{self.store.data_dir}"
         )
 
+    @staticmethod
+    def _version() -> str:
+        """读取插件版本号（来自包 ``__init__``）。"""
+        try:
+            from . import __version__
+
+            return __version__
+        except Exception:  # noqa: BLE001 - 版本号读取失败不影响主流程
+            return "unknown"
+
     # ------------------------------------------------------------------ 关键词互动
+
+    def _keyword_rules(self) -> list[tuple[str, str, bool]]:
+        """编译并缓存关键词规则。
+
+        配置在运行期不会变（AstrBot 改配置会重载插件），但为了防御
+        热更新场景，这里用签名做失效判断，只在内容变化时重建。
+
+        Returns:
+            ``[(关键词, 回复, 是否精确匹配), ...]``。
+        """
+        raw = self._cfg("auto_reply", "rules", default=[]) or []
+        signature = repr(raw)
+        if self._last_rules_signature == signature and self._keyword_cache is not None:
+            return self._keyword_cache[1]
+
+        rules: list[tuple[str, str, bool]] = []
+        if isinstance(raw, list):
+            for rule in raw[:_MAX_KEYWORD_RULES]:
+                if not isinstance(rule, dict):
+                    continue
+                keyword = str(rule.get("keyword", "")).strip()
+                reply = str(rule.get("reply", "")).strip()
+                if not keyword or not reply:
+                    continue
+                exact = rule.get("exact", False)
+                if isinstance(exact, str):
+                    exact = exact.strip().lower() not in {"false", "0", "no", "off", ""}
+                rules.append((keyword, reply, bool(exact)))
+        self._keyword_version += 1
+        self._last_rules_signature = signature
+        self._keyword_cache = (self._keyword_version, rules)
+        return rules
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_keyword(self, event: AstrMessageEvent) -> None:
@@ -929,7 +1215,7 @@ class InteractionPlugin(Star):
         Args:
             event: 消息事件。
         """
-        if not self._cfg("enabled", default=True):
+        if not self._bool("enabled", default=True):
             return
         if not self._feature_on("auto_reply", default=False):
             return
@@ -937,17 +1223,7 @@ class InteractionPlugin(Star):
         if not text:
             return
 
-        rules = self._cfg("auto_reply", "rules", default=[]) or []
-        if not isinstance(rules, list):
-            return
-        for rule in rules:
-            if not isinstance(rule, dict):
-                continue
-            keyword = str(rule.get("keyword", "")).strip()
-            reply = str(rule.get("reply", "")).strip()
-            if not keyword or not reply:
-                continue
-            exact = bool(rule.get("exact", False))
+        for keyword, reply, exact in self._keyword_rules():
             if (exact and text == keyword) or (not exact and keyword in text):
                 event.stop_event()
                 yield event.plain_result(reply)

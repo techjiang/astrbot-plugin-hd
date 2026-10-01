@@ -202,9 +202,55 @@ def test_rob_conserves_or_penalizes():
         assert delta < 0 and attacker["balance"] < 100
 
 
-def test_rob_rejects_poor_victim_and_bad_amount():
-    assert not games.rob_check({"balance": 10}, {"balance": 1}, 50)[0]
+def test_rob_reports_insufficient_amount():
+    """给对方余额不足时明确拒绝。"""
+    ok, delta, msg = games.rob_check({"balance": 100}, {"balance": 1}, 50)
+    assert not ok and delta == 0 and "不值得出手" in msg
     assert not games.rob_check({"balance": 10}, {"balance": 100}, 0)[0]
+
+
+def test_rob_amount_clamped_to_safe_cap():
+    """打劫金额会被压到 余额 / ROB_PENALTY_RATE 以内（反刷分核心）。"""
+    assert games.rob_max_amount(6, 1000) == 1
+    assert games.rob_max_amount(60, 1000) == 10
+    assert games.rob_max_amount(600, 1000) == 100
+    # 受害者余额更少时以受害者余额为上限
+    assert games.rob_max_amount(6000, 100) == 100
+    # 一穷二白打不了劫
+    assert games.rob_max_amount(5, 1000) == 0
+    ok, _, msg = games.rob_check({"balance": 5}, {"balance": 1000}, 50)
+    assert not ok and "先攒够" in msg
+
+
+def test_rob_expected_value_never_positive():
+    """期望收益恒不为正——打劫只能转移资产，不能凭空造分。"""
+    for attacker_balance in (0, 1, 6, 60, 600, 6000, 60000):
+        for victim_balance in (1, 10, 100, 1000, 10000):
+            for amount in (1, 10, 100, 1000, 100000):
+                cap = games.rob_max_amount(attacker_balance, victim_balance)
+                if cap <= 0:
+                    continue
+                ev = games.rob_expected_value(
+                    min(amount, cap), victim_balance, attacker_balance
+                )
+                assert ev <= 0.01, (attacker_balance, victim_balance, amount, ev)
+
+
+def test_rob_never_creates_currency_long_run():
+    """重复打劫不会让打劫者资产增长（历史漏洞：可无限刷分）。"""
+    rng = random.Random(99)
+    attacker = {"balance": 600}
+    for _ in range(5000):
+        victim = {"balance": 100000}
+        games.rob_check(attacker, victim, 100000, rng=rng)
+    assert attacker["balance"] <= 600
+
+
+def test_rob_success_rate_bounds():
+    assert games.rob_success_rate(1, 1000) <= 0.85
+    assert games.rob_success_rate(1000, 1000) >= 0.25
+    assert games.rob_success_rate(0, 100) == 0.0
+    assert games.rob_success_rate(10, 0) == 0.0
 
 
 # --------------------------------------------------------------------- 每日任务
@@ -216,7 +262,8 @@ def test_quest_progress_and_claim():
     games.bump_daily(user, "chain")
     games.bump_daily(user, "chain")
     ok, reward, _ = games.claim_quest(user, "chain")
-    assert ok and reward == 15 and user["balance"] == 15
+    expected = next(q[3] for q in games.DAILY_QUESTS if q[0] == "chain")
+    assert ok and reward == expected and user["balance"] == expected
 
 
 def test_quest_claim_blocked_when_incomplete():
@@ -247,3 +294,137 @@ def test_level_grows_with_balance():
     assert games.level_of({"balance": 0})[0] == 1
     assert games.level_of({"balance": 100})[0] == 2
     assert games.level_of({"balance": 10**9})[0] == 100
+
+
+def test_quest_progress_resets_across_days():
+    """跨天时当日进度必须归零，且不会误清当天已产生的进度。"""
+    user = {}
+    for _ in range(3):
+        games.bump_daily(user, "chain")
+    # 第一次读取会补上 quest_date，但绝不能清掉已有的当天进度
+    assert [(q["code"], c) for q, c, _ in games.quest_progress(user)][3][1] == 3
+    # 明确换成昨天 → 清零
+    user["quest_date"] = "2000-01-01"
+    assert games.sync_quest_acc(user) is True
+    assert user["daily_chain"] == 0
+    assert user["quest_done"] == []
+    # 同日再调用不会重置
+    assert games.sync_quest_acc(user) is False
+
+
+def test_quest_progress_survives_legacy_archive():
+    """只有累计字段的老档案（老版本没有 bump_daily）不应被判成「没做过」。"""
+    user = {"total_sign": 12, "quest_date": None}
+    progress = {q["code"]: c for q, c, _ in games.quest_progress(user)}
+    assert progress["sign"] == 1
+    ok, _, _ = games.claim_quest(user, "sign")
+    assert ok
+
+
+def test_level_of_returns_total_and_bar():
+    level, inner, need, total = games.level_of({"balance": 250, "total_sign": 10})
+    assert (level, inner, need, total) == (4, 0, 100, 300)
+    assert games.level_of({"balance": -100})[0] == 1
+
+
+def test_level_of_tolerates_dirty_values():
+    assert games.level_of({"balance": "abc", "total_sign": None})[0] == 1
+
+
+# --------------------------------------------------------------------- 新增玩法
+
+
+def test_lucky_number_is_stable_per_day_and_user():
+    a = games.lucky_number("2026-10-01", "1001")
+    b = games.lucky_number("2026-10-01", "1001")
+    assert a == b and games.LUCKY_MIN <= a <= games.LUCKY_MAX
+    # 换天 / 换人都会变（至少在足够多的样本里不全相等）
+    values = {games.lucky_number(f"2026-10-{d:02d}", "1001") for d in range(1, 29)}
+    assert len(values) > 3
+    users = {games.lucky_number("2026-10-01", str(i)) for i in range(50)}
+    assert len(users) > 5
+
+
+def test_lucky_hit():
+    target = games.lucky_number("2026-10-01", "7")
+    assert games.lucky_hit("2026-10-01", "7", target)
+    assert not games.lucky_hit("2026-10-01", "7", target + 1)
+    assert not games.lucky_hit("2026-10-01", "7", "abc")
+
+
+def test_eight_ball_requires_question():
+    ok, msg = games.eight_ball("")
+    assert not ok and "用法" in msg
+    ok, msg = games.eight_ball("今天要加班吗")
+    assert ok and msg.startswith("🔮") and "今天要加班吗" in msg
+
+
+def test_eight_ball_truncates_long_question():
+    ok, msg = games.eight_ball("问" * 500)
+    assert ok and len(msg) < 200
+
+
+def test_roast_includes_target():
+    assert games.roast("小明").startswith("@小明 ")
+    assert games.roast("").startswith("@")
+
+
+def test_dice_faces_text_uses_emoji_for_d6():
+    assert games.dice_faces_text([1, 6], 6) == "⚀ ⚅"
+    assert games.dice_faces_text([14, 5], 20) == "14 + 5"
+
+
+def test_format_duration():
+    assert games.format_duration(0) == "0 秒"
+    assert games.format_duration(90) == "1 分钟"
+    assert games.format_duration(7200).startswith("2 小时")
+    assert games.format_duration(90061).startswith("1 天 1 小时")
+
+
+def test_bar_edges():
+    assert games.bar(0, 100, 10) == "▱" * 10
+    assert games.bar(100, 100, 10) == "▰" * 10
+    assert games.bar(50, 0, 4) == "▱▱▱▱"
+    assert games.bar(999, 100, 4) == "▰▰▰▰"
+
+
+def test_percentile_of():
+    assert games.percentile_of([], 1) == 0.0
+    assert games.percentile_of([1, 2, 3, 4], 3) == 50.0
+    assert games.percentile_of([1, 2], 99) == 100.0
+
+
+def test_normalize_range_handles_dirty_input():
+    assert games.normalize_range(10, 1) == (1, 10)
+    assert games.normalize_range("abc", None) == (0, 0)
+    assert games.normalize_range(5, 5, min_span=1) == (5, 6)
+    assert games.normalize_range(1, 100) == (1, 100)
+
+
+def test_dice_count_face_clamping():
+    rolls, total = games.roll_dice(999, 999999, rng=random.Random(1))
+    assert len(rolls) == 10 and all(1 <= r <= 1000 for r in rolls)
+    assert total == sum(rolls)
+    rolls, _ = games.roll_dice(0, 0)
+    assert len(rolls) == 1
+
+
+def test_guess_game_clamps_range():
+    game = games.GuessGame.new("abc", "def", -5, rng=random.Random(1))
+    assert game.low == 0 and game.high == 1 and game.max_attempts == 1
+
+
+def test_guess_hint_still_close_after_narrowing():
+    game = games.GuessGame.new(1, 100, 10, rng=random.Random(1))
+    game.target = 50
+    _, hint = game.guess(48, "u1")
+    assert "太小了" in hint
+    assert "接近" in hint or "一点点" in hint or "感觉" in hint
+    assert "u1" in game.players
+
+
+def test_guess_win_records_winner():
+    game = games.GuessGame.new(1, 10, 5, rng=random.Random(1))
+    game.target = 5
+    result, _ = game.guess(5, "u9")
+    assert result == "win" and game.winner == "u9"

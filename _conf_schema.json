@@ -93,7 +93,8 @@
           "step": 5
         }
       }
-    }
+    },
+    "hint": "抽奖消耗积分。奖池期望值刻意略低于单次消耗，长期刷抽奖不会变成印钞机（默认 20 消耗对约 14 期望）。"
   },
   "guess_number": {
     "description": "猜数字设置",
@@ -144,7 +145,8 @@
           "step": 1
         }
       }
-    }
+    },
+    "hint": "猜数字。奖励会随范围与次数自动缩放：范围越大、次数越多，单次猜中奖励越高（最多 10 倍）。"
   },
   "word_chain": {
     "description": "词语接龙设置",
@@ -227,7 +229,7 @@
   "rob": {
     "description": "打劫设置",
     "type": "object",
-    "hint": "打劫群友积分。成功率随打劫比例下降，失败会反赔。",
+    "hint": "打劫群友积分。为防止刷分，打劫金额会被限制为你当前余额的 1/6，期望收益恒为 0 —— 只能转移资产，不能凭空造分。",
     "items": {
       "enabled": {
         "description": "启用打劫",
@@ -245,7 +247,8 @@
         "type": "bool",
         "default": false
       }
-    }
+    },
+    "hint": "掷骰子，用法 /掷骰 [数量] [面数]，或直接发 NdM（如 3d20）。"
   },
   "auto_reply": {
     "description": "关键词互动回复",
@@ -304,6 +307,52 @@
           "max": 60,
           "step": 1
         }
+      }
+    }
+  },
+  "lucky": {
+    "description": "幸运数字",
+    "type": "object",
+    "hint": "每天每人一个幸运数字（1~100）。发送 /幸运数字 查看，/幸运数字 <数字> 检验，命中可领奖，每天限一次。",
+    "items": {
+      "enabled": {
+        "description": "启用幸运数字",
+        "type": "bool",
+        "default": true
+      },
+      "reward": {
+        "description": "命中奖励积分",
+        "type": "int",
+        "default": 15,
+        "slider": {
+          "min": 1,
+          "max": 500,
+          "step": 1
+        }
+      }
+    }
+  },
+  "eight_ball": {
+    "description": "魔法八球",
+    "type": "object",
+    "hint": "娱乐玩法：给一个是/否问题一个随机答案，不影响积分。",
+    "items": {
+      "enabled": {
+        "description": "启用魔法八球",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "roast": {
+    "description": "扎心文案",
+    "type": "object",
+    "hint": "娱乐玩法：随机来一句损友文案，不影响积分。",
+    "items": {
+      "enabled": {
+        "description": "启用扎心文案",
+        "type": "bool",
+        "default": true
       }
     }
   }

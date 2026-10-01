@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
 
@@ -76,13 +77,27 @@ DEFAULT_CONFIG = {
     "dice": {"enabled": True},
     "auto_reply": {"enabled": True, "rules": []},
     "permission": {"group_only": True, "cooldown_seconds": 0},
+    "lucky": {"enabled": True, "reward": 15},
+    "eight_ball": {"enabled": True},
+    "roast": {"enabled": True},
 }
+
+
+def _fresh_config() -> dict:
+    """返回一份深拷贝的默认配置。
+
+    handler 会就地修改 ``self.config``（例如把冷却时间临时调大），
+    若用例之间共享同一份 dict，就会互相污染 —— 之前
+    ``test_guard_cooldown`` 把 cooldown 改成 60 后，紧随其后的用例
+    全都被冷却挡住了。这里每次都用全新副本。
+    """
+    return copy.deepcopy(DEFAULT_CONFIG)
 
 
 @pytest.fixture()
 def plugin(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_main, "DATA_SUBDIR", tmp_path / "data")
-    return plugin_main.InteractionPlugin(context=None, config=dict(DEFAULT_CONFIG))
+    return plugin_main.InteractionPlugin(context=None, config=_fresh_config())
 
 
 async def run(plugin, method: str, event, **kwargs):
@@ -165,7 +180,7 @@ async def test_claim_with_code_works(plugin):
     sign_event = make_event("签到")
     await run(plugin, "cmd_sign", sign_event)
     out = await run(plugin, "cmd_claim", make_event("领取 sign"))
-    assert "获得 10 积分" in out
+    assert "完成，获得" in out
     assert "没有这个任务" not in out
 
 
@@ -328,3 +343,135 @@ async def test_bad_config_values_fall_back(plugin):
     assert await run(plugin, "cmd_sign", make_event("签到"))
     assert await run(plugin, "cmd_rank", make_event("排行榜"), metric="积分")
     assert await run(plugin, "cmd_lottery", make_event("抽奖"))
+
+
+# ------------------------------------------------------- 新增玩法
+
+
+@pytest.mark.asyncio
+async def test_lucky_number_flow(plugin):
+    from astrbot_plugin_hudong import games
+
+    out = await run(plugin, "cmd_lucky", make_event("幸运数字"))
+    assert "幸运数字是" in out
+    lucky = games.lucky_number(games.today_str(), "1001")
+    out = await run(plugin, "cmd_lucky", make_event(f"幸运数字 {lucky}"))
+    assert "猜对了" in out
+    # 同一天只能领一次
+    out = await run(plugin, "cmd_lucky", make_event(f"幸运数字 {lucky}"))
+    assert "已经领过" in out
+    # 非数字
+    out = await run(plugin, "cmd_lucky", make_event("幸运数字 abc"))
+    assert "整数" in out
+
+
+@pytest.mark.asyncio
+async def test_eight_ball_and_roast(plugin):
+    assert "🔮" in await run(
+        plugin, "cmd_eight_ball", make_event("八球 走不走"), question="走不走"
+    )
+    assert "用法" in await run(
+        plugin, "cmd_eight_ball", make_event("八球"), question=""
+    )
+    assert "@" in await run(plugin, "cmd_roast", make_event("扎心"), target="")
+
+
+@pytest.mark.asyncio
+async def test_dice_parses_ndm_and_dirty_args(plugin):
+    out = await run(plugin, "cmd_dice", make_event("掷骰 3 20"), count=3, faces=20)
+    assert "3d20" in out
+    # 框架解析失败时 count/faces 为 0，必须回退到原始文本
+    out = await run(plugin, "cmd_dice", make_event("掷骰 abc"), count=0, faces=0)
+    assert "1d6" in out and "不是数字" in out
+    out = await run(plugin, "cmd_dice", make_event("掷骰"), count=0, faces=0)
+    assert "1d6" in out
+
+
+@pytest.mark.asyncio
+async def test_rank_invalid_metric_is_reported(plugin):
+    """默认值不能吞掉非法输入（历史陷阱：默认 "积分" 会静默兜底）。"""
+    out = await run(plugin, "cmd_rank", make_event("排行榜 乱写"), metric="乱写")
+    assert "可排行维度" in out
+    # 不传参数时才走默认维度（没有数据时也应给出正常的空态提示）
+    out = await run(plugin, "cmd_rank", make_event("排行榜"), metric="")
+    assert "积分" in out
+
+
+@pytest.mark.asyncio
+async def test_rank_supports_new_metrics(plugin):
+    await run(plugin, "cmd_dice", make_event("掷骰"), count=1, faces=6)
+    out = await run(plugin, "cmd_rank", make_event("排行榜 掷骰"), metric="掷骰")
+    assert "掷骰" in out
+
+
+@pytest.mark.asyncio
+async def test_rob_clamps_amount_and_reports(plugin):
+    await run(plugin, "cmd_sign", make_event("签到", uid="1002"))
+    await run(plugin, "cmd_sign", make_event("签到"))
+    out = await run(plugin, "cmd_rob", make_event("打劫"), target="1002", amount=99999)
+    assert "打劫" in out
+    # 金额被收敛时会有提示
+    assert "上限" in out or "不值得出手" in out
+
+
+@pytest.mark.asyncio
+async def test_rob_broken_attacker_is_rejected(plugin):
+    """余额低于赔偿倍数的打劫者被拒绝（防止零成本试错）。"""
+    await run(plugin, "cmd_sign", make_event("签到", uid="1002"))
+    out = await run(plugin, "cmd_rob", make_event("打劫"), target="1002", amount=1)
+    assert "先攒够" in out
+
+
+@pytest.mark.asyncio
+async def test_transfer_rejects_non_int(plugin):
+    await run(plugin, "cmd_sign", make_event("签到"))
+    # 直接调用 handler 模拟框架解析失败后传入非法值
+    out = await run(
+        plugin, "cmd_transfer", make_event("转账"), target="1002", amount="abc"
+    )
+    assert "整数" in out
+
+
+@pytest.mark.asyncio
+async def test_chain_hint_throttled(plugin):
+    """轮到自己但接错时的提示需要节流，避免刷屏。"""
+    await run(plugin, "cmd_chain_start", make_event("接龙 互动"))
+    game = plugin._chains["aiocqhttp_group_888"]
+    game.last_user = "9999"  # 假装别人刚接过
+    ev = make_event("随便")
+    ev.message_str = "随便"
+    first = await run(plugin, "on_chain_message", ev)
+    second = await run(plugin, "on_chain_message", ev)
+    assert first.strip() and not second.strip()
+
+
+@pytest.mark.asyncio
+async def test_new_features_respect_switches(plugin):
+    plugin.config["lucky"]["enabled"] = False
+    assert "已关闭" in await run(plugin, "cmd_lucky", make_event("幸运数字"))
+    plugin.config["eight_ball"]["enabled"] = False
+    assert "已关闭" in await run(
+        plugin, "cmd_eight_ball", make_event("八球 x"), question="x"
+    )
+    plugin.config["roast"]["enabled"] = False
+    assert "已关闭" in await run(plugin, "cmd_roast", make_event("扎心"), target="")
+
+
+@pytest.mark.asyncio
+async def test_keyword_rule_cache_invalidated(plugin):
+    plugin.config["auto_reply"]["rules"] = [
+        {"keyword": "甲", "reply": "一", "exact": False}
+    ]
+    assert "一" in await run(plugin, "on_keyword", make_event("甲"))
+    plugin.config["auto_reply"]["rules"] = [
+        {"keyword": "乙", "reply": "二", "exact": False}
+    ]
+    assert "二" in await run(plugin, "on_keyword", make_event("乙"))
+    assert await run(plugin, "on_keyword", make_event("甲")) == ""
+
+
+@pytest.mark.asyncio
+async def test_balance_shows_rank_and_lucky(plugin):
+    await run(plugin, "cmd_sign", make_event("签到"))
+    out = await run(plugin, "cmd_balance", make_event("积分"))
+    assert "本群第" in out and "幸运数字" in out
