@@ -14,7 +14,7 @@
 [![deps](https://img.shields.io/badge/第三方依赖-0-ff9800)](./requirements.txt)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
-[使用文档](./使用文档.md) · [开发改进文档](./开发改进文档.md) · [问题反馈](https://cnb.cool/asoe/TechSauce/astrbot-plugin-hd/-/issues)
+[使用文档](./使用文档.md) · [开发改进文档](./开发改进文档.md) · [问题反馈](https://github.com/techjiang/astrbot-plugin-hd/issues)
 
 </div>
 
@@ -55,7 +55,7 @@ AstrBot 侧所需的一切（`astrbot.api.*`）都由 AstrBot 自身提供，
 
    ```bash
    cd /path/to/astrbot/data/plugins
-   git clone https://cnb.cool/asoe/TechSauce/astrbot-plugin-hd.git astrbot_plugin_hudong
+   git clone https://github.com/techjiang/astrbot-plugin-hd.git astrbot_plugin_hudong
    ```
 
    > 仓库名是 `astrbot-plugin-hd`，插件名是 `astrbot_plugin_hudong`

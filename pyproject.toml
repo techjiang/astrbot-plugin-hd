@@ -7,10 +7,10 @@ authors = [{ name = "科技酱" }]
 license = { text = "MIT" }
 
 [project.urls]
-Homepage = "https://cnb.cool/asoe/TechSauce/astrbot-plugin-hd"
-Repository = "https://cnb.cool/asoe/TechSauce/astrbot-plugin-hd"
+Homepage = "https://github.com/techjiang/astrbot-plugin-hd"
+Repository = "https://github.com/techjiang/astrbot-plugin-hd"
 Documentation = "https://docs.asoe.cn"
-Issues = "https://cnb.cool/asoe/TechSauce/astrbot-plugin-hd/-/issues"
+Issues = "https://github.com/techjiang/astrbot-plugin-hd/issues"
 
 [tool.ruff]
 line-length = 88

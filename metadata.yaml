@@ -4,7 +4,7 @@ desc: 新一代群聊互动插件 —— 签到、积分、转账、抽奖、猜
 short_desc: 让群聊热闹起来的一站式互动玩法合集，零第三方依赖。
 version: v1.0.0
 author: 科技酱
-repo: https://cnb.cool/asoe/TechSauce/astrbot-plugin-hd
+repo: https://github.com/techjiang/astrbot-plugin-hd
 author_website: https://docs.asoe.cn
 github: https://github.com/techjiang/
 bilibili: https://space.bilibili.com/1768832152
