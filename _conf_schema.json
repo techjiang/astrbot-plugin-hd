@@ -9,7 +9,7 @@
     "description": "积分名称",
     "type": "string",
     "default": "互动币",
-    "hint": "用于签到、抽奖等玩法的货币名称，可自定义。"
+    "hint": "签到、抽奖等玩法的货币名称，可自定义。"
   },
   "sign_in": {
     "description": "签到设置",
@@ -42,10 +42,10 @@
         }
       },
       "streak_bonus": {
-        "description": "连续签到额外奖励系数",
+        "description": "连续签到加成系数",
         "type": "float",
         "default": 0.1,
-        "hint": "每连续一天，额外奖励 = 基础奖励 * 系数 * 连续天数，上限见 max_streak_bonus。",
+        "hint": "每连续一天，奖励倍数 = 1 + 系数 × 连续天数，上限见 max_streak_bonus。",
         "slider": {
           "min": 0,
           "max": 1,
@@ -74,7 +74,7 @@
         "default": true
       },
       "cost": {
-        "description": "单次抽奖消耗积分",
+        "description": "单次消耗积分",
         "type": "int",
         "default": 20,
         "slider": {
@@ -84,44 +84,13 @@
         }
       },
       "cooldown_seconds": {
-        "description": "抽奖冷却时间（秒）",
+        "description": "冷却时间（秒）",
         "type": "int",
         "default": 30,
         "slider": {
           "min": 0,
           "max": 3600,
           "step": 5
-        }
-      }
-    }
-  },
-  "vote": {
-    "description": "投票设置",
-    "type": "object",
-    "items": {
-      "enabled": {
-        "description": "启用投票",
-        "type": "bool",
-        "default": true
-      },
-      "max_options": {
-        "description": "单次投票最大选项数",
-        "type": "int",
-        "default": 10,
-        "slider": {
-          "min": 2,
-          "max": 20,
-          "step": 1
-        }
-      },
-      "duration_seconds": {
-        "description": "投票持续时长（秒）",
-        "type": "int",
-        "default": 300,
-        "slider": {
-          "min": 30,
-          "max": 86400,
-          "step": 30
         }
       }
     }
@@ -138,12 +107,22 @@
       "min": {
         "description": "数字最小值",
         "type": "int",
-        "default": 1
+        "default": 1,
+        "slider": {
+          "min": 0,
+          "max": 100000,
+          "step": 1
+        }
       },
       "max": {
         "description": "数字最大值",
         "type": "int",
-        "default": 100
+        "default": 100,
+        "slider": {
+          "min": 1,
+          "max": 1000000,
+          "step": 1
+        }
       },
       "max_attempts": {
         "description": "最大猜测次数",
@@ -168,7 +147,7 @@
     }
   },
   "word_chain": {
-    "description": "成语/词语接龙设置",
+    "description": "词语接龙设置",
     "type": "object",
     "items": {
       "enabled": {
@@ -177,7 +156,7 @@
         "default": true
       },
       "timeout_seconds": {
-        "description": "接龙超时时间（秒）",
+        "description": "超时时间（秒）",
         "type": "int",
         "default": 60,
         "slider": {
@@ -187,7 +166,7 @@
         }
       },
       "reward": {
-        "description": "接龙成功奖励积分",
+        "description": "每次接龙奖励积分",
         "type": "int",
         "default": 5,
         "slider": {
@@ -198,12 +177,43 @@
       }
     }
   },
+  "vote": {
+    "description": "投票设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用投票",
+        "type": "bool",
+        "default": true
+      },
+      "max_options": {
+        "description": "最大选项数",
+        "type": "int",
+        "default": 10,
+        "slider": {
+          "min": 2,
+          "max": 20,
+          "step": 1
+        }
+      },
+      "duration_seconds": {
+        "description": "持续时长（秒）",
+        "type": "int",
+        "default": 300,
+        "slider": {
+          "min": 30,
+          "max": 86400,
+          "step": 30
+        }
+      }
+    }
+  },
   "rank": {
     "description": "排行榜设置",
     "type": "object",
     "items": {
       "size": {
-        "description": "排行榜显示人数",
+        "description": "显示人数",
         "type": "int",
         "default": 10,
         "slider": {
@@ -211,6 +221,29 @@
           "max": 50,
           "step": 1
         }
+      }
+    }
+  },
+  "rob": {
+    "description": "打劫设置",
+    "type": "object",
+    "hint": "打劫群友积分。成功率随打劫比例下降，失败会反赔。",
+    "items": {
+      "enabled": {
+        "description": "启用打劫",
+        "type": "bool",
+        "default": false
+      }
+    }
+  },
+  "dice": {
+    "description": "掷骰设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用掷骰子",
+        "type": "bool",
+        "default": false
       }
     }
   },
@@ -243,7 +276,7 @@
                 "default": ""
               },
               "exact": {
-                "description": "是否精确匹配",
+                "description": "是否精确匹配（完全相等）",
                 "type": "bool",
                 "default": false
               }

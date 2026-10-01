@@ -1,9 +1,0 @@
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-.idea/
-.vscode/
-*.log
-.DS_Store
-.ruff_cache/

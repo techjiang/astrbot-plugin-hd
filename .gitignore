@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.idea/
+.vscode/
+*.log
+.DS_Store
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# AstrBot 运行时数据（不纳入版本控制）
+data/

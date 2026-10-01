@@ -1,0 +1,25 @@
+[project]
+name = "astrbot_plugin_hudong"
+version = "1.0.0"
+description = "互动 —— 新一代群聊互动 AstrBot 插件"
+requires-python = ">=3.10"
+authors = [{ name = "科技酱" }]
+license = { text = "MIT" }
+
+[project.urls]
+Homepage = "https://cnb.cool/asoe/TechSauce/astrbot-plugin-hd"
+Documentation = "https://docs.asoe.cn"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+exclude = ["__pycache__", ".ruff_cache", ".pytest_cache"]
+
+[tool.ruff.lint]
+select = ["F", "W", "E", "ASYNC", "C4", "Q", "I", "UP", "B", "SIM", "RET"]
+ignore = ["F403", "F405", "E501", "ASYNC230", "ASYNC240", "B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]

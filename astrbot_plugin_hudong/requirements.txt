@@ -1,2 +1,0 @@
-# 互动插件运行依赖
-# 仅依赖 AstrBot 自带的 aiohttp/pyyaml 等，无需额外安装第三方库。
