@@ -1,0 +1,33 @@
+[project]
+name = "astrbot_plugin_hudong"
+version = "1.0.1"
+description = "互动 —— 新一代群聊互动 AstrBot 插件"
+requires-python = ">=3.10"
+authors = [{ name = "科技酱" }]
+license = { text = "MIT" }
+
+[project.urls]
+Homepage = "https://github.com/techjiang/astrbot-plugin-hd"
+Repository = "https://github.com/techjiang/astrbot-plugin-hd"
+Documentation = "https://docs.asoe.cn"
+Issues = "https://github.com/techjiang/astrbot-plugin-hd/issues"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+# ruff 会连带格式化 Markdown 里嵌入的 python 代码块，
+# 那些片段是给人看的示意代码，缩进/对齐是刻意的，故排除文档
+exclude = ["__pycache__", ".ruff_cache", ".pytest_cache", "*.md"]
+
+[tool.ruff.lint]
+select = ["F", "W", "E", "ASYNC", "C4", "Q", "I", "UP", "B", "SIM", "RET"]
+ignore = ["F403", "F405", "E501", "ASYNC230", "ASYNC240", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# 端到端脚本需要先注册包再导入，无法把 import 提到文件顶部
+"tools/e2e_smoke.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
