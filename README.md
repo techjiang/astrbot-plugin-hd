@@ -35,12 +35,13 @@
 - **不阻塞事件循环** —— 序列化与写盘都在线程池，`fsync` + 原子替换保证不写坏文件
 - **配置可视化** —— 15 个配置分组全部能在 WebUI 里可视化调整
 - **数值经得起推敲** —— 抽奖期望、打劫期望都做过收敛，不存在刷分漏洞
-- **109 项单测 + 51 项真实框架冒烟** —— 每次改动都会跑
+- **117 项单测 + 51 项真实框架冒烟** —— 每次改动都会跑
 
 ## 快速开始
 
-1. 把仓库放进 AstrBot 的 `data/plugins/astrbot_plugin_hudong/`
-   （目录名保持 `astrbot_plugin_hudong`）
+1. 把仓库克隆/下载到 AstrBot 的 `data/plugins/` 下，目录名保持
+   `astrbot_plugin_hudong`（插件源码就在仓库根目录，不要把 `astrbot_plugin_hudong/`
+   再套一层）
 2. 重启 AstrBot，或在 WebUI 里重载插件
 3. 群里发送 `/互动` 查看玩法总览
 
@@ -84,7 +85,8 @@
 
 ## 数据与迁移
 
-数据落在 `data/astrbot_plugin_hudong/<平台>_<会话>.json`，一个群一个文件：
+数据落在 AstrBot 工作目录下的 `data/astrbot_plugin_hudong/<平台>_<会话>.json`，
+一个群一个文件：
 
 ```json
 {
@@ -105,9 +107,9 @@
 pip install ruff pytest pytest-asyncio
 
 ruff format . && ruff check .      # 代码风格
-python -m pytest tests -q          # 109 项单元/集成测试
+python -m pytest tests -q          # 117 项单元/集成测试
 python tools/e2e_smoke.py          # 真实 AstrBot 框架下的 51 项冒烟测试
-python tools/build_logo.py <原图> assets   # 重新生成 logo 资源
+python tools/build_logo.py assets/design-source.png assets   # 重新生成 logo 资源
 ```
 
 > `pytest-asyncio` 是可选的 —— `tests/conftest.py` 内置了一个极简的
@@ -122,8 +124,14 @@ python tools/build_logo.py <原图> assets   # 重新生成 logo 资源
 
 仓库根目录的 `logo.png` 是 AstrBot WebUI 插件列表读取的固定文件名；
 `assets/` 下还有多尺寸图标（`logo-*.png`）、纯图形版（`glyph-*.png`）、
-文档横幅（`banner.png`）与社交预览图。全部由 `tools/build_logo.py`
-从原始设计稿自动生成，可一键重建。
+favicon、文档横幅（`banner.png`）与社交预览图，全部由 `tools/build_logo.py`
+从 `assets/design-source.png` 自动生成，可一键重建：
+
+```bash
+python tools/build_logo.py assets/design-source.png assets
+```
+
+生成逻辑在 `tools/logo_tools.py`，配套单测见 `tests/test_logo_tools.py`。
 
 <br clear="left">
 
