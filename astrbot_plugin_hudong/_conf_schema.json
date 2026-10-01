@@ -1,0 +1,277 @@
+{
+  "enabled": {
+    "description": "启用互动插件",
+    "type": "bool",
+    "default": true,
+    "hint": "总开关。关闭后所有互动指令将不再响应。"
+  },
+  "currency_name": {
+    "description": "积分名称",
+    "type": "string",
+    "default": "互动币",
+    "hint": "用于签到、抽奖等玩法的货币名称，可自定义。"
+  },
+  "sign_in": {
+    "description": "签到设置",
+    "type": "object",
+    "hint": "每日签到相关配置。",
+    "items": {
+      "enabled": {
+        "description": "启用签到",
+        "type": "bool",
+        "default": true
+      },
+      "min_reward": {
+        "description": "签到最少奖励",
+        "type": "int",
+        "default": 10,
+        "slider": {
+          "min": 0,
+          "max": 1000,
+          "step": 1
+        }
+      },
+      "max_reward": {
+        "description": "签到最多奖励",
+        "type": "int",
+        "default": 50,
+        "slider": {
+          "min": 0,
+          "max": 5000,
+          "step": 1
+        }
+      },
+      "streak_bonus": {
+        "description": "连续签到额外奖励系数",
+        "type": "float",
+        "default": 0.1,
+        "hint": "每连续一天，额外奖励 = 基础奖励 * 系数 * 连续天数，上限见 max_streak_bonus。",
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        }
+      },
+      "max_streak_bonus": {
+        "description": "连续签到奖励上限（倍数）",
+        "type": "float",
+        "default": 2.0,
+        "slider": {
+          "min": 1,
+          "max": 10,
+          "step": 0.5
+        }
+      }
+    }
+  },
+  "lottery": {
+    "description": "抽奖设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用抽奖",
+        "type": "bool",
+        "default": true
+      },
+      "cost": {
+        "description": "单次抽奖消耗积分",
+        "type": "int",
+        "default": 20,
+        "slider": {
+          "min": 0,
+          "max": 1000,
+          "step": 1
+        }
+      },
+      "cooldown_seconds": {
+        "description": "抽奖冷却时间（秒）",
+        "type": "int",
+        "default": 30,
+        "slider": {
+          "min": 0,
+          "max": 3600,
+          "step": 5
+        }
+      }
+    }
+  },
+  "vote": {
+    "description": "投票设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用投票",
+        "type": "bool",
+        "default": true
+      },
+      "max_options": {
+        "description": "单次投票最大选项数",
+        "type": "int",
+        "default": 10,
+        "slider": {
+          "min": 2,
+          "max": 20,
+          "step": 1
+        }
+      },
+      "duration_seconds": {
+        "description": "投票持续时长（秒）",
+        "type": "int",
+        "default": 300,
+        "slider": {
+          "min": 30,
+          "max": 86400,
+          "step": 30
+        }
+      }
+    }
+  },
+  "guess_number": {
+    "description": "猜数字设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用猜数字",
+        "type": "bool",
+        "default": true
+      },
+      "min": {
+        "description": "数字最小值",
+        "type": "int",
+        "default": 1
+      },
+      "max": {
+        "description": "数字最大值",
+        "type": "int",
+        "default": 100
+      },
+      "max_attempts": {
+        "description": "最大猜测次数",
+        "type": "int",
+        "default": 10,
+        "slider": {
+          "min": 1,
+          "max": 50,
+          "step": 1
+        }
+      },
+      "reward": {
+        "description": "猜中奖励积分",
+        "type": "int",
+        "default": 30,
+        "slider": {
+          "min": 0,
+          "max": 1000,
+          "step": 1
+        }
+      }
+    }
+  },
+  "word_chain": {
+    "description": "成语/词语接龙设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用接龙",
+        "type": "bool",
+        "default": true
+      },
+      "timeout_seconds": {
+        "description": "接龙超时时间（秒）",
+        "type": "int",
+        "default": 60,
+        "slider": {
+          "min": 10,
+          "max": 600,
+          "step": 5
+        }
+      },
+      "reward": {
+        "description": "接龙成功奖励积分",
+        "type": "int",
+        "default": 5,
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 1
+        }
+      }
+    }
+  },
+  "rank": {
+    "description": "排行榜设置",
+    "type": "object",
+    "items": {
+      "size": {
+        "description": "排行榜显示人数",
+        "type": "int",
+        "default": 10,
+        "slider": {
+          "min": 3,
+          "max": 50,
+          "step": 1
+        }
+      }
+    }
+  },
+  "auto_reply": {
+    "description": "关键词互动回复",
+    "type": "object",
+    "hint": "当群消息命中关键词时自动回复，可配置多条规则。",
+    "items": {
+      "enabled": {
+        "description": "启用关键词互动",
+        "type": "bool",
+        "default": false
+      },
+      "rules": {
+        "description": "关键词规则列表",
+        "type": "template_list",
+        "default": [],
+        "templates": {
+          "rule": {
+            "name": "规则",
+            "items": {
+              "keyword": {
+                "description": "关键词",
+                "type": "string",
+                "default": ""
+              },
+              "reply": {
+                "description": "回复内容",
+                "type": "string",
+                "default": ""
+              },
+              "exact": {
+                "description": "是否精确匹配",
+                "type": "bool",
+                "default": false
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "permission": {
+    "description": "权限与限流",
+    "type": "object",
+    "items": {
+      "group_only": {
+        "description": "仅在群聊中生效",
+        "type": "bool",
+        "default": true
+      },
+      "cooldown_seconds": {
+        "description": "指令全局冷却（秒/人）",
+        "type": "int",
+        "default": 1,
+        "slider": {
+          "min": 0,
+          "max": 60,
+          "step": 1
+        }
+      }
+    }
+  }
+}
