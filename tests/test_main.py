@@ -248,11 +248,7 @@ async def test_transfer_guards(plugin):
     assert "已转给" in await run(plugin, "cmd_transfer", make_event("转账 1002 5"))
     assert "不能给自己" in await run(plugin, "cmd_transfer", make_event("转账 1001 5"))
     assert "余额不足" in await run(
-        plugin,
-        "cmd_transfer",
-        make_event("转账 1002 99999"),
-        target="1002",
-        amount=99999,
+        plugin, "cmd_transfer", make_event("转账 1002 99999")
     )
 
 

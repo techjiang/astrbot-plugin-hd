@@ -147,6 +147,7 @@ class Harness:
             star_handlers_registry.get_handlers_by_module_name(f"{PKG}.main")
         )
         self._by_name = {h.handler_name: h for h in self.handlers}
+        self.filter_errors: list[str] = []
 
     def parsed_params(self, handler_name: str, event) -> dict:
         """跑一遍该 handler 的 CommandFilter，取出框架解析出的参数。"""
@@ -159,8 +160,11 @@ class Harness:
         cf = command_filters[0]
         try:
             ok = cf.filter(event, {})
-        except ValueError:
-            # 参数类型不合法时框架会抛错 → 该 handler 被跳过
+        except ValueError as e:
+            # 框架在参数解析失败时会抛错并跳过该 handler。以前这里直接返回 {}，
+            # 于是「签名不合法导致所有指令失效」被伪装成「该指令没参数」而放行。
+            # 现在记下来，由契约检查统一报错。
+            self.filter_errors.append(f"{handler_name}: {e}")
             return {}
         if not ok:
             return {}
@@ -245,6 +249,35 @@ async def main() -> int:
     print(f"[注册] {len(h.handlers)} 个 handler，其中 {len(cmds)} 个指令处理器")
     for name in sorted(cmds):
         print(f"  {name:<18} {cmds[name]}")
+
+    # ---------- 1.1) 参数契约 ----------
+    # CommandFilter 会把 handler 的形参逐个当成「指令参数」去解析：默认值参数可省，
+    # 无默认值的参数（含 **kwargs 展开出的 VAR_KEYWORD）一律视为必填，缺参即抛
+    # 「必要参数缺失」并被唤醒阶段吞掉 —— 表现就是群里发任何指令都没反应。
+    # 这里在静态层面把所有指令过一遍空参数，任何一条不通过都直接失败。
+    contract_failures: list[str] = []
+    for handler in h.handlers:
+        for f in handler.event_filters:
+            if not isinstance(f, CommandFilter):
+                continue
+            try:
+                f.validate_and_convert_params([], f.handler_params)
+            except Exception as e:  # noqa: BLE001 - 契约失败要如实报出
+                contract_failures.append(
+                    f"{handler.handler_name}: {f.print_types()} → {e}"
+                )
+    if contract_failures:
+        results.append(
+            (
+                "指令签名契约（无参数可解析）",
+                False,
+                "；".join(contract_failures),
+            )
+        )
+    else:
+        results.append(
+            (f"指令签名契约（{len(cmds)} 条指令无参数可解析）", True, "全部通过")
+        )
 
     expected = {
         "cmd_sign",
@@ -534,6 +567,18 @@ async def main() -> int:
     files = list((tmp / "data").glob("*.json"))
     assert files, "卸载后没有数据文件"
     print(f"\n[生命周期] 卸载刷盘成功，{len(files)} 个数据文件")
+
+    # ---------- 6.1) 参数解析期间的框架报错 ----------
+    if h.filter_errors:
+        results.append(
+            (
+                "参数解析无框架报错",
+                False,
+                "；".join(sorted(set(h.filter_errors))),
+            )
+        )
+    else:
+        results.append(("参数解析无框架报错", True, "全部通过"))
 
     # ---------- 汇总 ----------
     failed = [r for r in results if not r[1]]
