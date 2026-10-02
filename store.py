@@ -56,6 +56,17 @@ USER_FIELDS: dict[str, Any] = {
     "dice_count": 0,
     "lucky_hit": 0,
     "lucky_last": "",
+    # ---- 扩展玩法字段（v1.1.0）----
+    "bj_win": 0,  # 21 点胜场
+    "bomb_win": 0,  # 数字炸弹安全次数
+    "riddle_win": 0,  # 猜谜答对次数
+    "duel_win": 0,  # PK 胜场
+    "gift_sent": 0,  # 送出礼物数
+    "gift_received": 0,  # 收到礼物数
+    "confess_count": 0,  # 表白次数
+    "frames": [],  # 已解锁头像框
+    "bag": {},  # 背包：道具 ID -> 数量
+    "intimacy": {},  # 与他人的亲密度：a|b -> 点数
 }
 
 

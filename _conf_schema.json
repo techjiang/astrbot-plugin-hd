@@ -11,6 +11,25 @@
     "default": "互动币",
     "hint": "签到、抽奖等玩法的货币名称，可自定义。"
   },
+  "trigger": {
+    "description": "触发方式",
+    "type": "object",
+    "hint": "控制群里的指令如何被触发。",
+    "items": {
+      "wake_free": {
+        "description": "免 @ 直接触发",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后群里直接发「签到」「/签到」即可触发，无需 @机器人。"
+      },
+      "auto_regex_games": {
+        "description": "游戏消息自动接管",
+        "type": "bool",
+        "default": true,
+        "hint": "接龙、猜数字、数字炸弹等游戏进行中，无需任何前缀即可直接参与。"
+      }
+    }
+  },
   "sign_in": {
     "description": "签到设置",
     "type": "object",
@@ -250,6 +269,239 @@
     },
     "hint": "掷骰子，用法 /掷骰 [数量] [面数]，或直接发 NdM（如 3d20）。"
   },
+  "blackjack": {
+    "description": "21 点",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用 21 点",
+        "type": "bool",
+        "default": true
+      },
+      "min_bet": {
+        "description": "最低下注",
+        "type": "int",
+        "default": 10,
+        "slider": {
+          "min": 1,
+          "max": 1000,
+          "step": 1
+        }
+      },
+      "max_bet": {
+        "description": "最高下注",
+        "type": "int",
+        "default": 500,
+        "slider": {
+          "min": 10,
+          "max": 100000,
+          "step": 10
+        }
+      }
+    }
+  },
+  "bomb": {
+    "description": "数字炸弹",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用数字炸弹",
+        "type": "bool",
+        "default": true
+      },
+      "min": {
+        "description": "区间最小值",
+        "type": "int",
+        "default": 1
+      },
+      "max": {
+        "description": "区间最大值",
+        "type": "int",
+        "default": 100
+      },
+      "punish": {
+        "description": "踩雷扣分",
+        "type": "int",
+        "default": 10,
+        "slider": {
+          "min": 0,
+          "max": 500,
+          "step": 1
+        }
+      },
+      "reward": {
+        "description": "每轮安全奖励",
+        "type": "int",
+        "default": 1,
+        "slider": {
+          "min": 0,
+          "max": 50,
+          "step": 1
+        }
+      },
+      "timeout_seconds": {
+        "description": "超时时间（秒）",
+        "type": "int",
+        "default": 180,
+        "slider": {
+          "min": 30,
+          "max": 1800,
+          "step": 10
+        }
+      }
+    }
+  },
+  "riddle": {
+    "description": "猜谜",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用猜谜",
+        "type": "bool",
+        "default": true
+      },
+      "timeout_seconds": {
+        "description": "抢答超时（秒）",
+        "type": "int",
+        "default": 60,
+        "slider": {
+          "min": 10,
+          "max": 600,
+          "step": 5
+        }
+      },
+      "reward": {
+        "description": "答对奖励",
+        "type": "int",
+        "default": 20,
+        "slider": {
+          "min": 0,
+          "max": 500,
+          "step": 1
+        }
+      }
+    }
+  },
+  "turtle_soup": {
+    "description": "海龟汤",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用海龟汤",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "rush": {
+    "description": "抢答（谁最先）",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用抢答",
+        "type": "bool",
+        "default": true
+      },
+      "timeout_seconds": {
+        "description": "超时时间（秒）",
+        "type": "int",
+        "default": 30,
+        "slider": {
+          "min": 5,
+          "max": 300,
+          "step": 5
+        }
+      },
+      "reward": {
+        "description": "抢到第一奖励",
+        "type": "int",
+        "default": 10,
+        "slider": {
+          "min": 0,
+          "max": 200,
+          "step": 1
+        }
+      }
+    }
+  },
+  "fortune": {
+    "description": "每日运势",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用每日运势",
+        "type": "bool",
+        "default": true
+      },
+      "cost": {
+        "description": "占卜消耗（0 为免费）",
+        "type": "int",
+        "default": 0,
+        "slider": {
+          "min": 0,
+          "max": 200,
+          "step": 1
+        }
+      }
+    }
+  },
+  "shop": {
+    "description": "称号 / 道具商店",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用商店",
+        "type": "bool",
+        "default": true
+      },
+      "allow_buy": {
+        "description": "允许购买",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "social": {
+    "description": "社交玩法（亲密度/送礼/表白/PK）",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用社交玩法",
+        "type": "bool",
+        "default": true
+      },
+      "intimacy_per_interact": {
+        "description": "每次互动增加亲密度",
+        "type": "int",
+        "default": 2,
+        "slider": {
+          "min": 0,
+          "max": 50,
+          "step": 1
+        }
+      },
+      "gift_intimacy": {
+        "description": "每份礼物额外亲密度",
+        "type": "int",
+        "default": 5,
+        "slider": {
+          "min": 0,
+          "max": 50,
+          "step": 1
+        }
+      },
+      "duel_stake": {
+        "description": "PK 默认赌注",
+        "type": "int",
+        "default": 20,
+        "slider": {
+          "min": 0,
+          "max": 1000,
+          "step": 5
+        }
+      }
+    }
+  },
   "auto_reply": {
     "description": "关键词互动回复",
     "type": "object",
@@ -307,6 +559,24 @@
           "max": 60,
           "step": 1
         }
+      },
+      "allow_list": {
+        "description": "白名单用户 ID",
+        "type": "list",
+        "default": [],
+        "hint": "非空时仅名单内用户可参与互动玩法。"
+      },
+      "deny_list": {
+        "description": "黑名单用户 ID",
+        "type": "list",
+        "default": [],
+        "hint": "名单内用户将被禁止参与互动玩法。"
+      },
+      "admin_ids": {
+        "description": "插件管理员 ID",
+        "type": "list",
+        "default": [],
+        "hint": "除 AstrBot 全局管理员外，额外授予管理指令权限的用户。"
       }
     }
   },

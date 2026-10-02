@@ -150,6 +150,32 @@ def normalize_range(low: object, high: object, min_span: int = 0) -> tuple[int, 
     return lo, hi
 
 
+def parse_amount(raw: object, default: int = 0) -> int:
+    """宽容解析数量参数，支持 ``100`` / ``1k`` / ``1.5w`` / ``2万`` 等写法。
+
+    Args:
+        raw: 原始参数。
+        default: 解析失败时的默认值。
+
+    Returns:
+        解析出的整数；无法解析时返回 ``default``。
+    """
+    text = str(raw if raw is not None else "").strip().lower()
+    if not text:
+        return default
+    units = {"k": 1000, "w": 10000, "万": 10000, "千": 1000, "百": 100, "亿": 100000000}
+    scale = 1
+    for suffix, factor in units.items():
+        if text.endswith(suffix):
+            scale = factor
+            text = text[: -len(suffix)]
+            break
+    try:
+        return int(float(text) * scale)
+    except (TypeError, ValueError):
+        return default
+
+
 # --------------------------------------------------------------------- 每日任务进度
 
 
