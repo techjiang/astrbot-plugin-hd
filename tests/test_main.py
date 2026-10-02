@@ -26,8 +26,15 @@ from astrbot_plugin_hudong import main as plugin_main  # noqa: E402
 
 
 class _Event(AstrMessageEvent):
-    async def send(self, *args, **kwargs):  # pragma: no cover - 仅满足接口
-        return None
+    def __init__(self, *args, **kwargs):
+        """记录发出的消息，便于断言免唤醒入口（走 event.send()）的输出。"""
+        super().__init__(*args, **kwargs)
+        self.sent: list = []
+
+    async def send(self, *args, **kwargs):
+        if args:
+            self.sent.append(args[0])
+        return
 
 
 def make_event(text: str, uid: str = "1001", gid: str = "888", admin: bool = False):
@@ -80,6 +87,27 @@ DEFAULT_CONFIG = {
     "lucky": {"enabled": True, "reward": 15},
     "eight_ball": {"enabled": True},
     "roast": {"enabled": True},
+    "trigger": {"wake_free": True, "auto_regex_games": True},
+    "blackjack": {"enabled": True, "min_bet": 10, "max_bet": 500},
+    "bomb": {
+        "enabled": True,
+        "min": 1,
+        "max": 100,
+        "punish": 10,
+        "reward": 1,
+        "timeout_seconds": 180,
+    },
+    "riddle": {"enabled": True, "timeout_seconds": 60, "reward": 20},
+    "turtle_soup": {"enabled": True},
+    "rush": {"enabled": True, "timeout_seconds": 30, "reward": 10},
+    "fortune": {"enabled": True, "cost": 0},
+    "shop": {"enabled": True, "allow_buy": True},
+    "social": {
+        "enabled": True,
+        "intimacy_per_interact": 2,
+        "gift_intimacy": 5,
+        "duel_stake": 20,
+    },
 }
 
 
@@ -111,9 +139,11 @@ async def run(plugin, method: str, event, **kwargs):
         items = [item async for item in result]
     else:
         items = [await result]
+    items.extend(getattr(event, "sent", []))
     return "\n".join(
         item.get_plain_text() if hasattr(item, "get_plain_text") else str(item)
         for item in items
+        if item is not None
     )
 
 
@@ -215,12 +245,8 @@ async def test_balance_reports_state(plugin):
 @pytest.mark.asyncio
 async def test_transfer_guards(plugin):
     await run(plugin, "cmd_sign", make_event("签到"))
-    assert "已转给" in await run(
-        plugin, "cmd_transfer", make_event("转账 1002 5"), target="1002", amount=5
-    )
-    assert "不能给自己" in await run(
-        plugin, "cmd_transfer", make_event("转账 1001 5"), target="1001", amount=5
-    )
+    assert "已转给" in await run(plugin, "cmd_transfer", make_event("转账 1002 5"))
+    assert "不能给自己" in await run(plugin, "cmd_transfer", make_event("转账 1001 5"))
     assert "余额不足" in await run(
         plugin,
         "cmd_transfer",
@@ -244,14 +270,14 @@ async def test_guess_flow(plugin):
     await run(plugin, "cmd_guess_start", make_event("猜数字"))
     game = plugin._guesses["aiocqhttp_group_888"]
     assert "猜中了" in await run(
-        plugin, "cmd_guess", make_event("猜"), number=game.target
+        plugin, "cmd_guess", make_event("猜"), args=str(game.target)
     )
 
 
 @pytest.mark.asyncio
 async def test_guess_without_game(plugin):
     assert "没有进行中的猜数字" in await run(
-        plugin, "cmd_guess", make_event("猜"), number=50
+        plugin, "cmd_guess", make_event("猜"), args="50"
     )
 
 
@@ -259,19 +285,19 @@ async def test_guess_without_game(plugin):
 async def test_rank_all_metrics(plugin):
     await run(plugin, "cmd_sign", make_event("签到"))
     for metric in ("积分", "签到", "抽奖", "猜中", "接龙", "打劫"):
-        out = await run(plugin, "cmd_rank", make_event("排行榜"), metric=metric)
+        out = await run(plugin, "cmd_rank", make_event("排行榜"), args=metric)
         assert out.strip()
     assert "可排行维度" in await run(
-        plugin, "cmd_rank", make_event("排行榜"), metric="乱写"
+        plugin, "cmd_rank", make_event("排行榜"), args="乱写"
     )
 
 
 @pytest.mark.asyncio
 async def test_dice_and_rob(plugin):
-    assert "🎲" in await run(plugin, "cmd_dice", make_event("掷骰"), count=2, faces=6)
+    assert "🎲" in await run(plugin, "cmd_dice", make_event("掷骰 2 6"))
     await run(plugin, "cmd_sign", make_event("签到", uid="1002"))
     await run(plugin, "cmd_sign", make_event("签到"))
-    out = await run(plugin, "cmd_rob", make_event("打劫"), target="1002", amount=5)
+    out = await run(plugin, "cmd_rob", make_event("打劫 1002 5"))
     assert "打劫" in out
 
 
@@ -310,8 +336,8 @@ async def test_keyword_reply(plugin):
     plugin.config["auto_reply"]["rules"] = [
         {"keyword": "你好", "reply": "你也好呀", "exact": False}
     ]
-    assert "你也好呀" in await run(plugin, "on_keyword", make_event("你好啊"))
-    assert await run(plugin, "on_keyword", make_event("再见")) == ""
+    assert "你也好呀" in await run(plugin, "on_message", make_event("你好啊"))
+    assert await run(plugin, "on_message", make_event("再见")) == ""
 
 
 @pytest.mark.asyncio
@@ -321,7 +347,7 @@ async def test_keyword_ignores_malformed_rules(plugin):
         {"keyword": "", "reply": "x"},
         None,
     ]
-    assert await run(plugin, "on_keyword", make_event("随便")) == ""
+    assert await run(plugin, "on_message", make_event("随便")) == ""
 
 
 @pytest.mark.asyncio
@@ -346,7 +372,7 @@ async def test_bad_config_values_fall_back(plugin):
     plugin.config["lottery"]["cost"] = None
     plugin.config["rank"]["size"] = "十"
     assert await run(plugin, "cmd_sign", make_event("签到"))
-    assert await run(plugin, "cmd_rank", make_event("排行榜"), metric="积分")
+    assert await run(plugin, "cmd_rank", make_event("排行榜"), args="积分")
     assert await run(plugin, "cmd_lottery", make_event("抽奖"))
 
 
@@ -372,40 +398,36 @@ async def test_lucky_number_flow(plugin):
 
 @pytest.mark.asyncio
 async def test_eight_ball_and_roast(plugin):
-    assert "🔮" in await run(
-        plugin, "cmd_eight_ball", make_event("八球 走不走"), question="走不走"
-    )
-    assert "用法" in await run(
-        plugin, "cmd_eight_ball", make_event("八球"), question=""
-    )
-    assert "@" in await run(plugin, "cmd_roast", make_event("扎心"), target="")
+    assert "🔮" in await run(plugin, "cmd_eight_ball", make_event("八球 走不走"))
+    assert "用法" in await run(plugin, "cmd_eight_ball", make_event("八球"))
+    assert "@" in await run(plugin, "cmd_roast", make_event("扎心"))
 
 
 @pytest.mark.asyncio
 async def test_dice_parses_ndm_and_dirty_args(plugin):
-    out = await run(plugin, "cmd_dice", make_event("掷骰 3 20"), count=3, faces=20)
+    out = await run(plugin, "cmd_dice", make_event("掷骰 3 20"))
     assert "3d20" in out
     # 框架解析失败时 count/faces 为 0，必须回退到原始文本
-    out = await run(plugin, "cmd_dice", make_event("掷骰 abc"), count=0, faces=0)
+    out = await run(plugin, "cmd_dice", make_event("掷骰 abc"))
     assert "1d6" in out and "不是数字" in out
-    out = await run(plugin, "cmd_dice", make_event("掷骰"), count=0, faces=0)
+    out = await run(plugin, "cmd_dice", make_event("掷骰"))
     assert "1d6" in out
 
 
 @pytest.mark.asyncio
 async def test_rank_invalid_metric_is_reported(plugin):
     """默认值不能吞掉非法输入（历史陷阱：默认 "积分" 会静默兜底）。"""
-    out = await run(plugin, "cmd_rank", make_event("排行榜 乱写"), metric="乱写")
+    out = await run(plugin, "cmd_rank", make_event("排行榜 乱写"))
     assert "可排行维度" in out
     # 不传参数时才走默认维度（没有数据时也应给出正常的空态提示）
-    out = await run(plugin, "cmd_rank", make_event("排行榜"), metric="")
+    out = await run(plugin, "cmd_rank", make_event("排行榜"))
     assert "积分" in out
 
 
 @pytest.mark.asyncio
 async def test_rank_supports_new_metrics(plugin):
-    await run(plugin, "cmd_dice", make_event("掷骰"), count=1, faces=6)
-    out = await run(plugin, "cmd_rank", make_event("排行榜 掷骰"), metric="掷骰")
+    await run(plugin, "cmd_dice", make_event("掷骰"))
+    out = await run(plugin, "cmd_rank", make_event("排行榜 掷骰"))
     assert "掷骰" in out
 
 
@@ -413,7 +435,7 @@ async def test_rank_supports_new_metrics(plugin):
 async def test_rob_clamps_amount_and_reports(plugin):
     await run(plugin, "cmd_sign", make_event("签到", uid="1002"))
     await run(plugin, "cmd_sign", make_event("签到"))
-    out = await run(plugin, "cmd_rob", make_event("打劫"), target="1002", amount=99999)
+    out = await run(plugin, "cmd_rob", make_event("打劫 1002 99999"))
     assert "打劫" in out
     # 金额被收敛时会有提示
     assert "上限" in out or "不值得出手" in out
@@ -423,7 +445,7 @@ async def test_rob_clamps_amount_and_reports(plugin):
 async def test_rob_broken_attacker_is_rejected(plugin):
     """余额低于赔偿倍数的打劫者被拒绝（防止零成本试错）。"""
     await run(plugin, "cmd_sign", make_event("签到", uid="1002"))
-    out = await run(plugin, "cmd_rob", make_event("打劫"), target="1002", amount=1)
+    out = await run(plugin, "cmd_rob", make_event("打劫 1002 1"))
     assert "先攒够" in out
 
 
@@ -431,9 +453,7 @@ async def test_rob_broken_attacker_is_rejected(plugin):
 async def test_transfer_rejects_non_int(plugin):
     await run(plugin, "cmd_sign", make_event("签到"))
     # 直接调用 handler 模拟框架解析失败后传入非法值
-    out = await run(
-        plugin, "cmd_transfer", make_event("转账"), target="1002", amount="abc"
-    )
+    out = await run(plugin, "cmd_transfer", make_event("转账 1002 abc"))
     assert "整数" in out
 
 
@@ -445,8 +465,8 @@ async def test_chain_hint_throttled(plugin):
     game.last_user = "9999"  # 假装别人刚接过
     ev = make_event("随便")
     ev.message_str = "随便"
-    first = await run(plugin, "on_chain_message", ev)
-    second = await run(plugin, "on_chain_message", ev)
+    first = await run(plugin, "_chain_submit", ev, word="随便")
+    second = await run(plugin, "_chain_submit", ev, word="随便")
     assert first.strip() and not second.strip()
 
 
@@ -455,11 +475,9 @@ async def test_new_features_respect_switches(plugin):
     plugin.config["lucky"]["enabled"] = False
     assert "已关闭" in await run(plugin, "cmd_lucky", make_event("幸运数字"))
     plugin.config["eight_ball"]["enabled"] = False
-    assert "已关闭" in await run(
-        plugin, "cmd_eight_ball", make_event("八球 x"), question="x"
-    )
+    assert "已关闭" in await run(plugin, "cmd_eight_ball", make_event("八球 x"))
     plugin.config["roast"]["enabled"] = False
-    assert "已关闭" in await run(plugin, "cmd_roast", make_event("扎心"), target="")
+    assert "已关闭" in await run(plugin, "cmd_roast", make_event("扎心"))
 
 
 @pytest.mark.asyncio
@@ -467,12 +485,12 @@ async def test_keyword_rule_cache_invalidated(plugin):
     plugin.config["auto_reply"]["rules"] = [
         {"keyword": "甲", "reply": "一", "exact": False}
     ]
-    assert "一" in await run(plugin, "on_keyword", make_event("甲"))
+    assert "一" in await run(plugin, "on_message", make_event("甲"))
     plugin.config["auto_reply"]["rules"] = [
         {"keyword": "乙", "reply": "二", "exact": False}
     ]
-    assert "二" in await run(plugin, "on_keyword", make_event("乙"))
-    assert await run(plugin, "on_keyword", make_event("甲")) == ""
+    assert "二" in await run(plugin, "on_message", make_event("乙"))
+    assert await run(plugin, "on_message", make_event("甲")) == ""
 
 
 @pytest.mark.asyncio
@@ -535,3 +553,284 @@ def test_resolve_data_dir_falls_back_without_astrbot(tmp_path, monkeypatch):
     resolved = plugin_main.resolve_data_dir()
     assert resolved == Path("data") / "plugin_data" / plugin_main.PLUGIN_NAME
     assert "plugin_data" in resolved.parts
+
+
+# ------------------------------------------------------- 免唤醒触发
+
+
+@pytest.mark.asyncio
+async def test_wake_free_triggers_without_at(plugin):
+    """核心诉求：群里直接发指令就能触发，不需要 @机器人。"""
+    for i, text in enumerate(("签到", "/签到", "!签到", "#签到", "／签到")):
+        ev = make_event(text, uid=f"w{i}")
+        ev.is_at_or_wake_command = False  # 没有 @，也没有唤醒前缀
+        ev.is_wake = False
+        out = await run(plugin, "on_message", ev)
+        assert "签到成功" in out, (text, out)
+
+
+@pytest.mark.asyncio
+async def test_wake_free_command_with_args(plugin):
+    await run(plugin, "on_message", make_event("签到"))
+    out = await run(plugin, "on_message", make_event("排行榜 签到"))
+    assert "签到排行榜" in out
+
+
+@pytest.mark.asyncio
+async def test_wake_free_prefers_longest_command(plugin):
+    """「投票结果」不能被「投票」抢先命中。"""
+    out = await run(plugin, "on_message", make_event("投票结果 abc"))
+    assert "没有找到" in out
+
+
+@pytest.mark.asyncio
+async def test_wake_free_ignores_unrelated(plugin):
+    assert await run(plugin, "on_message", make_event("今天天气不错")) == ""
+
+
+@pytest.mark.asyncio
+async def test_wake_free_can_be_disabled(plugin):
+    plugin.config["trigger"]["wake_free"] = False
+    ev = make_event("签到")
+    ev.is_at_or_wake_command = False
+    assert await run(plugin, "on_message", ev) == ""
+
+
+@pytest.mark.asyncio
+async def test_wake_free_respects_master_switch(plugin):
+    plugin.config["enabled"] = False
+    ev = make_event("签到")
+    ev.is_at_or_wake_command = False
+    assert await run(plugin, "on_message", ev) == ""
+
+
+def test_normalize_strips_prefixes(plugin):
+    for raw in ("签到", "/签到", "!签到", "#签到", "／签到", "  签到  "):
+        assert plugin._normalize(raw) == "签到"
+    assert plugin._normalize("排行榜   签到") == "排行榜 签到"
+
+
+def test_resolve_command_returns_handler_and_rest(plugin):
+    hit = plugin._resolve_command("排行榜 签到")
+    assert hit is not None and hit[1] == "签到"
+    hit = plugin._resolve_command("投票结果 abc")
+    assert hit is not None and hit[1] == "abc"
+    assert plugin._resolve_command("完全无关的一句话") is None
+    assert plugin._resolve_command("") is None
+
+
+def test_resolve_uid_variants(plugin):
+    assert plugin._resolve_uid("@1001") == "1001"
+    assert plugin._resolve_uid("[At:1001]") == "1001"
+    assert plugin._resolve_uid("1001") == "1001"
+    assert plugin._resolve_uid("") == ""
+    assert plugin._resolve_uid("abc") == ""
+
+
+# ------------------------------------------------------- 游戏自动接管
+
+
+@pytest.mark.asyncio
+async def test_auto_game_guess_plain_number(plugin):
+    await run(plugin, "cmd_guess_start", make_event("猜数字"))
+    game = plugin._guesses["aiocqhttp_group_888"]
+    out = await run(plugin, "on_message", make_event(str(game.target)))
+    assert "猜中了" in out
+
+
+@pytest.mark.asyncio
+async def test_auto_game_chain_plain_word(plugin):
+    await run(plugin, "cmd_chain_start", make_event("接龙 互动"))
+    out = await run(plugin, "on_message", make_event("动物"))
+    assert "接龙成功" in out
+
+
+@pytest.mark.asyncio
+async def test_auto_game_bomb_plain_number(plugin):
+    await run(plugin, "cmd_bomb_start", make_event("数字炸弹 1 30"))
+    target = plugin._bombs["aiocqhttp_group_888"].target
+    out = await run(plugin, "on_message", make_event(str(target)))
+    assert "BOOM" in out
+
+
+@pytest.mark.asyncio
+async def test_auto_game_vote(plugin):
+    await run(plugin, "cmd_vote_create", make_event("投票 测试 | A | B"))
+    pid = next(iter(plugin.store.polls("aiocqhttp_group_888")))
+    out = await run(plugin, "on_message", make_event(f"投 {pid} 1"))
+    assert "已投票" in out
+
+
+@pytest.mark.asyncio
+async def test_auto_game_rush(plugin):
+    await run(plugin, "cmd_rush", make_event("谁最先 冲鸭"))
+    out = await run(plugin, "on_message", make_event("冲鸭冲鸭"))
+    assert "抢到第一" in out
+
+
+@pytest.mark.asyncio
+async def test_auto_game_can_be_disabled(plugin):
+    plugin.config["trigger"]["auto_regex_games"] = False
+    await run(plugin, "cmd_guess_start", make_event("猜数字"))
+    game = plugin._guesses["aiocqhttp_group_888"]
+    assert await run(plugin, "on_message", make_event(str(game.target))) == ""
+
+
+# ------------------------------------------------------- 扩展玩法指令
+
+
+@pytest.mark.asyncio
+async def test_blackjack_flow(plugin):
+    plugin.store.add_balance("aiocqhttp_group_888", "1001", 1000)
+    out = await run(plugin, "cmd_blackjack", make_event("21点 50"))
+    # 可能起手天胡直接结算，否则继续要牌/停牌
+    if "21 点开始" in out:
+        out = await run(plugin, "cmd_bj_stand", make_event("停牌"))
+    assert any(k in out for k in ("你赢了", "庄家赢了", "平局", "爆牌"))
+
+
+@pytest.mark.asyncio
+async def test_blackjack_requires_balance(plugin):
+    assert "余额不足" in await run(plugin, "cmd_blackjack", make_event("21点"))
+
+
+@pytest.mark.asyncio
+async def test_blackjack_no_game(plugin):
+    assert "没有进行中的 21 点" in await run(plugin, "cmd_bj_stand", make_event("停牌"))
+    assert "没有进行中的 21 点" in await run(plugin, "cmd_bj_hit", make_event("要牌"))
+
+
+@pytest.mark.asyncio
+async def test_blackjack_balance_conservation(plugin):
+    """多次对局后余额不得为负。"""
+    key = "aiocqhttp_group_888"
+    for _ in range(40):
+        plugin.store.add_balance(key, "7777", 100)
+        await run(plugin, "cmd_blackjack", make_event("21点 10", uid="7777"))
+        await run(plugin, "cmd_bj_stand", make_event("停牌", uid="7777"))
+        assert plugin.store.get_user(key, "7777")["balance"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_riddle_and_answer(plugin):
+    await run(plugin, "cmd_riddle", make_event("猜谜"))
+    answer = plugin._riddles["aiocqhttp_group_888"]["answer"]
+    out = await run(plugin, "cmd_riddle_answer", make_event("谜底"))
+    assert "谜底是" in out and answer in out
+
+
+@pytest.mark.asyncio
+async def test_riddle_guess_auto(plugin):
+    await run(plugin, "cmd_riddle", make_event("猜谜"))
+    answer = plugin._riddles["aiocqhttp_group_888"]["answer"]
+    out = await run(plugin, "on_message", make_event(str(answer)))
+    assert "答对" in out
+
+
+@pytest.mark.asyncio
+async def test_soup_flow(plugin):
+    await run(plugin, "cmd_soup", make_event("海龟汤"))
+    assert "aiocqhttp_group_888" in plugin._soups
+    out = await run(plugin, "cmd_soup_answer", make_event("汤底"))
+    assert "汤底：" in out
+
+
+@pytest.mark.asyncio
+async def test_soup_missing(plugin):
+    assert "没有进行中的海龟汤" in await run(
+        plugin, "cmd_soup_answer", make_event("汤底")
+    )
+
+
+@pytest.mark.asyncio
+async def test_fortune_stable(plugin):
+    first = await run(plugin, "cmd_fortune", make_event("占卜"))
+    second = await run(plugin, "cmd_fortune", make_event("占卜"))
+    assert first == second
+    assert "运势" in first
+
+
+@pytest.mark.asyncio
+async def test_shop_buy_wear_bag(plugin):
+    plugin.store.add_balance("aiocqhttp_group_888", "1001", 1000)
+    assert "互动商店" in await run(plugin, "cmd_shop", make_event("商店"))
+    assert "购买成功" in await run(plugin, "cmd_buy", make_event("购买 称号·非酋"))
+    assert "非酋" in await run(plugin, "cmd_bag", make_event("背包"))
+    assert "已佩戴" in await run(plugin, "cmd_wear", make_event("佩戴 非酋"))
+    assert "已卸下" in await run(plugin, "cmd_wear", make_event("佩戴"))
+
+
+@pytest.mark.asyncio
+async def test_buy_insufficient_and_unknown(plugin):
+    assert "余额不足" in await run(
+        plugin, "cmd_buy", make_event("购买 头像框·天选之人")
+    )
+    assert "没有找到" in await run(plugin, "cmd_buy", make_event("购买 不存在"))
+
+
+@pytest.mark.asyncio
+async def test_buy_duplicate_title_refunded(plugin):
+    plugin.store.add_balance("aiocqhttp_group_888", "1001", 1000)
+    await run(plugin, "cmd_buy", make_event("购买 称号·非酋"))
+    before = plugin.store.get_user("aiocqhttp_group_888", "1001")["balance"]
+    out = await run(plugin, "cmd_buy", make_event("购买 称号·非酋"))
+    after = plugin.store.get_user("aiocqhttp_group_888", "1001")["balance"]
+    assert "已经拥有" in out and before == after
+
+
+@pytest.mark.asyncio
+async def test_gift_and_intimacy(plugin):
+    plugin.store.add_balance("aiocqhttp_group_888", "1001", 1000)
+    out = await run(plugin, "cmd_gift", make_event("赠送 1002 奶茶"))
+    assert "送出了" in out
+    assert "亲密度" in await run(plugin, "cmd_intimacy", make_event("亲密度 1002"))
+
+
+@pytest.mark.asyncio
+async def test_gift_rejects_self_and_unknown(plugin):
+    plugin.store.add_balance("aiocqhttp_group_888", "1001", 1000)
+    assert "不能送给自己" in await run(plugin, "cmd_gift", make_event("赠送 1001 奶茶"))
+    assert "没有这种礼物" in await run(plugin, "cmd_gift", make_event("赠送 1002 游艇"))
+
+
+@pytest.mark.asyncio
+async def test_confess_and_duel(plugin):
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 1000)
+    plugin.store.add_balance(key, "1002", 1000)
+    assert "亲密度" in await run(plugin, "cmd_confess", make_event("表白 1002"))
+    assert "⚔️" in await run(plugin, "cmd_duel", make_event("pk 1002 10"))
+
+
+@pytest.mark.asyncio
+async def test_duel_rejects_self(plugin):
+    assert "不能和自己打" in await run(plugin, "cmd_duel", make_event("pk 1001"))
+
+
+@pytest.mark.asyncio
+async def test_random_and_joke(plugin):
+    assert "我选" in await run(plugin, "cmd_random", make_event("随机 火锅|烧烤"))
+    assert "😂" in await run(plugin, "cmd_joke", make_event("笑话"))
+
+
+@pytest.mark.asyncio
+async def test_random_requires_two_options(plugin):
+    assert "至少" in await run(plugin, "cmd_random", make_event("随机 只有一个"))
+
+
+@pytest.mark.asyncio
+async def test_new_features_respect_master_switch(plugin):
+    plugin.config["enabled"] = False
+    for method, text in (
+        ("cmd_blackjack", "21点"),
+        ("cmd_bomb_start", "数字炸弹"),
+        ("cmd_riddle", "猜谜"),
+        ("cmd_soup", "海龟汤"),
+        ("cmd_rush", "谁最快"),
+        ("cmd_fortune", "占卜"),
+        ("cmd_shop", "商店"),
+        ("cmd_gift", "赠送 1002 奶茶"),
+        ("cmd_duel", "pk 1002"),
+    ):
+        out = await run(plugin, method, make_event(text))
+        assert "已关闭" in out, (method, out)

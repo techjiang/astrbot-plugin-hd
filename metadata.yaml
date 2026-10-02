@@ -1,8 +1,8 @@
 name: astrbot_plugin_hudong
 display_name: 互动
-desc: 新一代群聊互动插件 —— 签到、积分、转账、抽奖、猜数字、词语接龙、投票、排行榜、每日任务、打劫、掷骰、幸运数字、魔法八球与关键词互动等一整套群聊玩法。
-short_desc: 让群聊热闹起来的一站式互动玩法合集，零第三方依赖。
-version: v1.0.1
+desc: 免 @ 触发的新一代群聊互动插件 —— 签到、积分、抽奖、猜数字、接龙、21点、数字炸弹、猜谜、海龟汤、抢答、运势、称号商店、亲密度、PK 等 20+ 玩法一站式齐全。
+short_desc: 群里直接发指令就能玩的互动合集，免 @ 触发、零依赖。
+version: v1.1.1
 author: 科技酱
 repo: https://github.com/techjiang/astrbot-plugin-hd
 author_website: https://docs.asoe.cn
