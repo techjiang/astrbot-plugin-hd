@@ -8,7 +8,7 @@
 
 让群聊真正热闹起来的一站式玩法合集
 
-[![version](https://img.shields.io/badge/version-v1.1.0-4f7cff)](./metadata.yaml)
+[![version](https://img.shields.io/badge/version-v1.1.1-4f7cff)](./metadata.yaml)
 [![astrbot](https://img.shields.io/badge/AstrBot-%3E%3D4.10%2C%20%3C5-22c55e)](https://astrbot.app)
 [![python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)](./pyproject.toml)
 [![deps](https://img.shields.io/badge/第三方依赖-0-ff9800)](./requirements.txt)
