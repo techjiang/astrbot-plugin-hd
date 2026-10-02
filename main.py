@@ -440,25 +440,6 @@ class InteractionPlugin(Star):
         return MessageEventResult().message(reason)
 
     @staticmethod
-    def _legacy_args(kwargs: dict) -> str:
-        """把旧式关键字参数拼回成参数串（向后兼容）。
-
-        历史上的 handler 直接接收框架解析好的具名参数（如 ``number``、
-        ``target``、``amount``）。改为统一从 ``args`` 解析后，为兼容外部
-        直接调用（测试、脚本），仍支持以关键字传入。
-
-        Args:
-            kwargs: 除 ``event``/``args`` 之外的关键字参数。
-
-        Returns:
-            拼接后的参数串；无参数时返回空串。
-        """
-        if not kwargs:
-            return ""
-        values = [str(v) for v in kwargs.values() if v is not None and v != ""]
-        return " ".join(values)
-
-    @staticmethod
     def _args(event: AstrMessageEvent) -> str:
         """取出「指令名之后」的参数文本。
 
@@ -827,10 +808,9 @@ class InteractionPlugin(Star):
 
     @filter.command("签到", alias={"sign", "打卡"})
     async def cmd_sign(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """每日签到领取积分。"""
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         if not self._feature_on("sign_in"):
@@ -860,10 +840,9 @@ class InteractionPlugin(Star):
 
     @filter.command("积分", alias={"余额", "balance", "我的"})
     async def cmd_balance(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """查询个人积分、等级、称号与各项统计。"""
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         key = self._session_key(event)
@@ -890,14 +869,13 @@ class InteractionPlugin(Star):
 
     @filter.command("转账", alias={"转积分", "pay"})
     async def cmd_transfer(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """把积分转给群里其他成员。
 
         Args:
             args: ``<目标用户> <数量>``，目标可用 ``@某人`` 或用户 ID。
         """
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         parts = self._args(event).split()
@@ -923,10 +901,9 @@ class InteractionPlugin(Star):
 
     @filter.command("抽奖", alias={"抽卡", "lottery"})
     async def cmd_lottery(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """消耗积分抽奖。"""
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         if not self._feature_on("lottery"):
@@ -954,10 +931,9 @@ class InteractionPlugin(Star):
 
     @filter.command("猜数字", alias={"猜数", "guess"})
     async def cmd_guess_start(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """开始一局猜数字。"""
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         if not self._feature_on("guess_number"):
@@ -978,14 +954,13 @@ class InteractionPlugin(Star):
 
     @filter.command("猜", alias={"cai"})
     async def cmd_guess(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """提交猜数字答案。
 
         Args:
             args: 猜测的数字。
         """
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         raw = (args.strip() or self._args(event).strip()).split()
@@ -1036,10 +1011,9 @@ class InteractionPlugin(Star):
 
     @filter.command("接龙", alias={"词语接龙", "chain"})
     async def cmd_chain_start(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """开始一局词语接龙，可带起始词。"""
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         if not self._feature_on("word_chain"):
@@ -1116,10 +1090,9 @@ class InteractionPlugin(Star):
 
     @filter.command("投票")
     async def cmd_vote_create(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """发起投票，用法：/投票 问题 | 选项1 | 选项2 ..."""
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         if not self._feature_on("vote"):
@@ -1163,14 +1136,13 @@ class InteractionPlugin(Star):
 
     @filter.command("投")
     async def cmd_vote_cast(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """为指定投票选项投票。
 
         Args:
             args: ``<投票编号> <选项序号>``。
         """
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         parts = self._args(event).split()
@@ -1210,14 +1182,13 @@ class InteractionPlugin(Star):
 
     @filter.command("投票结果", alias={"查看投票"})
     async def cmd_vote_result(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """查看投票结果；不带编号时列出本会话全部投票。
 
         Args:
             args: 可选投票编号。
         """
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         key = self._session_key(event)
@@ -1260,7 +1231,7 @@ class InteractionPlugin(Star):
 
     @filter.command("掷骰", alias={"骰子", "dice", "roll"})
     async def cmd_dice(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """掷骰子。
 
@@ -1270,7 +1241,6 @@ class InteractionPlugin(Star):
         Args:
             args: ``<数量> <面数>`` 或 ``NdM``，可省略。
         """
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         if not self._feature_on("dice", default=False):
@@ -1293,14 +1263,13 @@ class InteractionPlugin(Star):
 
     @filter.command("打劫", alias={"抢劫", "rob"})
     async def cmd_rob(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """打劫群友的积分。
 
         Args:
             args: ``<目标用户> <数量>``（数量会被自动收敛到安全上限）。
         """
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         if not self._feature_on("rob", default=False):
@@ -1372,7 +1341,7 @@ class InteractionPlugin(Star):
 
     @filter.command("排行榜", alias={"排行", "rank", "榜单"})
     async def cmd_rank(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """查看本群排行榜。
 
@@ -1383,7 +1352,6 @@ class InteractionPlugin(Star):
         Args:
             args: 排行维度，见 ``_RANK_ALIASES``。
         """
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         raw = args.strip() or self._args(event).strip()
@@ -1413,10 +1381,9 @@ class InteractionPlugin(Star):
 
     @filter.command("每日任务", alias={"任务", "quest"})
     async def cmd_quest(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """查看每日任务进度。"""
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         key = self._session_key(event)
@@ -1439,10 +1406,9 @@ class InteractionPlugin(Star):
 
     @filter.command("领取", alias={"领奖", "claim"})
     async def cmd_claim(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """领取每日任务奖励；不带参数时一键领取所有可领任务。"""
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         key = self._session_key(event)
@@ -1480,14 +1446,13 @@ class InteractionPlugin(Star):
 
     @filter.command("幸运数字", alias={"幸运", "lucky"})
     async def cmd_lucky(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """查看今日幸运数字，或检验自己的数字是否命中。
 
         Args:
             args: 可选，要检验的数字。
         """
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         if not self._feature_on("lucky"):
@@ -1534,14 +1499,13 @@ class InteractionPlugin(Star):
 
     @filter.command("八球", alias={"魔法八球", "8ball"})
     async def cmd_eight_ball(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """魔法八球：给一个是/否问题一个答案。
 
         Args:
             args: 你的问题。
         """
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         if not self._feature_on("eight_ball"):
@@ -1552,14 +1516,13 @@ class InteractionPlugin(Star):
 
     @filter.command("扎心", alias={"扎心话", "roast"})
     async def cmd_roast(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """随机来一句扎心文案。
 
         Args:
             args: 可选，被扎心的对象（@某人 或 ID）。
         """
-        args = args or self._legacy_args(kwargs)
         if reason := self._guard(event):
             return self._deny(reason)
         if not self._feature_on("roast"):
@@ -1574,10 +1537,9 @@ class InteractionPlugin(Star):
 
     @filter.command("互动", alias={"互动帮助", "hd", "help"})
     async def cmd_help(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """查看互动插件帮助。"""
-        args = args or self._legacy_args(kwargs)
         dims = " / ".join(dict.fromkeys(self._RANK_TITLES.values()))
         return event.plain_result(
             "🎮 互动插件 · 玩法总览\n"
@@ -1613,10 +1575,9 @@ class InteractionPlugin(Star):
 
     @filter.command("互动状态", alias={"hd状态"})
     async def cmd_status(
-        self, event: AstrMessageEvent, args: str = "", **kwargs
+        self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """查看插件运行状态（管理员）。"""
-        args = args or self._legacy_args(kwargs)
         if not event.is_admin():
             return event.plain_result("只有管理员可以查看运行状态。")
         stats = self.store.stats()

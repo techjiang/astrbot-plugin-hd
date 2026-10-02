@@ -8,7 +8,7 @@
 
 让群聊真正热闹起来的一站式玩法合集
 
-[![version](https://img.shields.io/badge/version-v1.1.1-4f7cff)](./metadata.yaml)
+[![version](https://img.shields.io/badge/version-v1.1.2-4f7cff)](./metadata.yaml)
 [![astrbot](https://img.shields.io/badge/AstrBot-%3E%3D4.10%2C%20%3C5-22c55e)](https://astrbot.app)
 [![python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)](./pyproject.toml)
 [![deps](https://img.shields.io/badge/第三方依赖-0-ff9800)](./requirements.txt)
@@ -36,7 +36,7 @@
 - **不阻塞事件循环** —— 序列化与写盘都在线程池，`fsync` + 原子替换保证不写坏文件
 - **配置可视化** —— 23 个配置分组全部能在 WebUI 里可视化调整
 - **数值经得起推敲** —— 抽奖期望、打劫期望都做过收敛，不存在刷分漏洞
-- **199 项单测 + 真实框架冒烟** —— 每次改动都会跑，含免唤醒端到端回归
+- **241 项单测 + 真实框架冒烟** —— 每次改动都会跑，含免唤醒端到端回归
 
 ## 环境要求
 
