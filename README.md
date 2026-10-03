@@ -4,11 +4,11 @@
 
 # 互动 · AstrBot 群聊互动插件
 
-**签到 · 积分 · 抽奖 · 猜数字 · 接龙 · 21点 · 数字炸弹 · 猜谜 · 海龟汤 · 抢答 · 运势 · 商店 · 亲密度 · PK · 投票 · 排行榜**
+**签到 · 积分 · 抽奖 · 猜数字 · 接龙 · 21点 · 数字炸弹 · 猜谜 · 海龟汤 · 抢答 · 运势 · 商店 · 亲密度 · PK · 竞猜 · 井字棋 · 扫雷 · 数独破解 · 决斗盘 · 大转盘 · 成就 · 转生 · 投票 · 排行榜**
 
 让群聊真正热闹起来的一站式玩法合集
 
-[![version](https://img.shields.io/badge/version-v1.1.2-4f7cff)](./metadata.yaml)
+[![version](https://img.shields.io/badge/version-v1.2.0-4f7cff)](./metadata.yaml)
 [![astrbot](https://img.shields.io/badge/AstrBot-%3E%3D4.10%2C%20%3C5-22c55e)](https://astrbot.app)
 [![python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)](./pyproject.toml)
 [![deps](https://img.shields.io/badge/第三方依赖-0-ff9800)](./requirements.txt)
@@ -36,7 +36,7 @@
 - **不阻塞事件循环** —— 序列化与写盘都在线程池，`fsync` + 原子替换保证不写坏文件
 - **配置可视化** —— 23 个配置分组全部能在 WebUI 里可视化调整
 - **数值经得起推敲** —— 抽奖期望、打劫期望都做过收敛，不存在刷分漏洞
-- **241 项单测 + 真实框架冒烟** —— 每次改动都会跑，含免唤醒端到端回归
+- **347 项单测 + 真实框架冒烟** —— 每次改动都会跑，含免唤醒端到端回归
 
 ## 环境要求
 
@@ -124,13 +124,33 @@ AstrBot 侧所需的一切（`astrbot.api.*`）都由 AstrBot 自身提供，
 | `pk @某人 [赌注]` | 按战力对决，胜者赢走赌注 |
 | `扎心 [@某人]` | 互损文案 |
 
+### 对局类（v1.2.0 新增 7 个）
+
+| 指令 | 玩法 | 说明 |
+| --- | --- | --- |
+| `竞猜 问题 \| A \| B` → `下注 <序号> <金额>` → `开奖 [序号]` | 弹幕竞猜 | 按实时赔率派彩，冷门高赔；到点自动开奖 |
+| `井字棋` → 直接发格号 | 人机对弈 | AI 会连三也会堵你，理论上打不赢 |
+| `扫雷 [边长 雷数]` → 直接发格号 | 多人共建 | 踩雷扣分，清完全盘大家分奖池 |
+| `破解 [位数]` → 直接发数字串 | 数字破译 | Mastermind 规则，提前破解有额外奖励 |
+| `抛硬币 [正\|反] [赌注]` | 猜正反 | 无参数只抛不押，带赌注才结算 |
+| `决斗盘 <手势> [赌注]` | 石头剪刀布蜥蜴斯波克 | 每招恰好克两招、被两招克，完全平衡 |
+| `转盘 [次数]` | 幸运大转盘 | 期望低于消耗的回收型抽奖，可连抽 |
+
+### 成长类（v1.2.0 新增 3 个）
+
+| 指令 | 说明 |
+| --- | --- |
+| `成就` | 22 项成就，达成自动解锁并发奖 |
+| `转生 [确认]` | Lv.15 起可转生：积分归零换永久收益加成（最高 ×2.0） |
+| `我的加成` | 查看转生加成、成就进度与今日商店折扣 |
+
 ### 商店 · 排行 · 工具
 
 | 指令 | 说明 |
 | --- | --- |
-| `商店` → `购买 <道具名>` | 称号 / 头像框 / 消耗品 |
+| `商店` → `购买 <道具名>` | 称号 / 头像框 / 消耗品；每天随机折扣 |
 | `背包` → `佩戴 <称号名>` | 查看与装备 |
-| `排行榜 <维度>` | 积分 / 签到 / 抽奖 / 猜中 / 接龙 / 打劫 / 掷骰 / 幸运 / 21点 / PK / 送礼 |
+| `排行榜 <维度>` | 积分 / 签到 / 抽奖 / 猜中 / 接龙 / 打劫 / 掷骰 / 幸运 / 井字棋 / 扫雷通关 / 数字破解 / 竞猜 / 大转盘 / 抛硬币 |
 | `投票 问题 \| 选项1 \| 选项2` → `投 <编号> <序号>` → `投票结果` | 投票 |
 | `互动`（帮助）、`互动状态`、`互动统计` | 帮助与运行状态 |
 | 关键词回复 | WebUI 配置关键词与回复内容 |
@@ -139,13 +159,14 @@ AstrBot 侧所需的一切（`astrbot.api.*`）都由 AstrBot 自身提供，
 
 ## 配置
 
-所有配置都在 AstrBot WebUI → 插件配置 里，23 个分组：
+所有配置都在 AstrBot WebUI → 插件配置 里，33 个分组：
 
 `enabled` · `currency_name` · `trigger` · `sign_in` · `lottery` ·
 `guess_number` · `word_chain` · `vote` · `rank` · `rob` · `dice` ·
 `blackjack` · `bomb` · `riddle` · `turtle_soup` · `rush` · `fortune` ·
-`shop` · `social` · `lucky` · `eight_ball` · `roast` · `auto_reply` ·
-`permission`
+`shop` · `social` · `lucky` · `eight_ball` · `roast` ·
+`wager` · `tictactoe` · `mine` · `codebreaker` · `coin` · `rpsls` ·
+`wheel` · `rebirth_play` · `achievements` · `auto_reply` · `permission`
 
 默认值开箱即用。打劫与掷骰默认关闭（这两个玩法对群氛围影响较大，
 由群主主动开启更合适）；其余玩法默认全开。
@@ -186,8 +207,8 @@ AstrBot 侧所需的一切（`astrbot.api.*`）都由 AstrBot 自身提供，
 pip install ruff pytest pytest-asyncio
 
 ruff format . && ruff check .      # 代码风格
-python -m pytest tests -q          # 199 项单元/集成测试
-python tools/e2e_smoke.py          # 真实 AstrBot 框架下的端到端冒烟测试
+python -m pytest tests -q          # 347 项单元/集成测试
+python tools/e2e_smoke.py          # 真实 AstrBot 框架下的 132 项端到端冒烟测试
 python tools/build_logo.py assets/design-source.png assets   # 重新生成 logo 资源
 ```
 
