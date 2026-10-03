@@ -1,8 +1,8 @@
 name: astrbot_plugin_hudong
 display_name: 互动
-desc: 免 @ 触发的新一代群聊互动插件 —— 签到、积分、抽奖、猜数字、接龙、21点、数字炸弹、猜谜、海龟汤、抢答、竞猜、井字棋、扫雷、数字破解、决斗盘、大转盘、成就、转生、称号商店、亲密度、PK 等 30+ 玩法一站式齐全。
-short_desc: 群里直接发指令就能玩的互动合集，30+ 玩法、免 @ 触发、零依赖。
-version: v1.2.0
+desc: 免 @ 触发的新一代群聊互动插件 —— 签到、积分、抽奖、猜数字、接龙、21点、数字炸弹、猜谜、海龟汤、抢答、竞猜、井字棋、扫雷、数字破解、决斗盘、大转盘、成就标签、转生、赛季、宠物养成、群 Boss 战、称号商店、亲密度、PK 等 40+ 玩法一站式齐全。
+short_desc: 群里直接发指令就能玩的互动合集，40+ 玩法、免 @ 触发、零依赖。
+version: v1.3.0
 author: 科技酱
 repo: https://github.com/techjiang/astrbot-plugin-hd
 author_website: https://docs.asoe.cn
@@ -11,6 +11,25 @@ bilibili: https://space.bilibili.com/1768832152
 forum: https://forums.asoe.cn/
 qq_group: "291974598"
 qq_group_2: "474819022"
+# 插件标签：用于 AstrBot 商店分类与检索。
+# 与 GitHub 仓库 topics 保持一致，便于两边搜索命中同一批关键词。
+tags:
+  - 群聊互动
+  - 游戏
+  - 签到
+  - 积分
+  - 抽奖
+  - 排行榜
+  - 小游戏
+  - 养成
+  - 社交
+  - 免@触发
+  - 零依赖
+  - astrbot-plugin
+  - group-games
+  - mini-games
+  - idle-game
+
 support_platforms:
   - aiocqhttp
   - qq_official

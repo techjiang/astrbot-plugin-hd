@@ -936,6 +936,52 @@
       }
     }
   },
+  "boss": {
+    "description": "群 Boss 战",
+    "type": "object",
+    "hint": "全群协作击败 Boss，按伤害占比瓜分奖池。奖池总额小于全员总投入，不存在刷分空间。",
+    "items": {
+      "enabled": {
+        "description": "启用群 Boss 战",
+        "type": "bool",
+        "default": true
+      },
+      "max_spend": {
+        "description": "单次攻击投入上限",
+        "type": "int",
+        "default": 5000,
+        "slider": {
+          "min": 10,
+          "max": 100000,
+          "step": 10
+        }
+      }
+    }
+  },
+  "season": {
+    "description": "赛季",
+    "type": "object",
+    "hint": "按自然月分赛季，以「本季积分增量」定位段位，避免老玩家永久霸榜。",
+    "items": {
+      "enabled": {
+        "description": "启用赛季",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "pet": {
+    "description": "宠物养成",
+    "type": "object",
+    "hint": "轻养成玩法。单次照料产出上限极低，仅作为情绪价值与标签来源，不构成刷分路径。",
+    "items": {
+      "enabled": {
+        "description": "启用宠物养成",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
   "achievements": {
     "description": "成就设置",
     "type": "object",

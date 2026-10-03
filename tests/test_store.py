@@ -202,3 +202,39 @@ async def test_save_is_idempotent_for_clean_session(store: InteractionStore):
     await store.save("g1")  # 已落盘，无需再写
     after = next(store.data_dir.glob("*.json")).read_text(encoding="utf-8")
     assert before == after
+
+
+class TestSeasonGainTracking:
+    """赛季增量由 ``add_balance`` 统一累计 —— 这样它天然覆盖所有玩法。
+
+    这条设计的好处是「不必在每个结算点手工累加」，代价是必须保证
+    ``add_balance`` 的语义精确：只有**净增**才计入，扣分不能倒扣赛季增量。
+    """
+
+    def test_positive_change_accumulates(self, store):
+        store.add_balance("s1", "u1", 100)
+        store.add_balance("s1", "u1", 50)
+        assert store.get_user("s1", "u1")["season_gain"] == 150
+
+    def test_negative_change_does_not_decrease_gain(self, store):
+        store.add_balance("s1", "u1", 100)
+        store.add_balance("s1", "u1", -30)
+        assert store.get_user("s1", "u1")["season_gain"] == 100
+
+    def test_floor_at_zero_does_not_count_the_clamped_part(self, store):
+        """余额被夹到 0 时，只能按「实际到手」计入，不能按请求值计入。"""
+        store.add_balance("s1", "u1", 100)
+        store.add_balance("s1", "u1", -999)  # 夹到 0，实际减少 100
+        assert store.get_user("s1", "u1")["balance"] == 0
+        store.add_balance("s1", "u1", 40)
+        assert store.get_user("s1", "u1")["season_gain"] == 140
+
+    def test_transfer_increases_recipient_gain_only(self, store):
+        store.add_balance("s1", "a", 500)
+        store.transfer("s1", "a", "b", 200)
+        assert store.get_user("s1", "b")["season_gain"] == 200
+
+    def test_dirty_field_is_repaired(self, store):
+        store.get_user("s1", "u1")["season_gain"] = "乱写"
+        store.add_balance("s1", "u1", 10)
+        assert store.get_user("s1", "u1")["season_gain"] == 10

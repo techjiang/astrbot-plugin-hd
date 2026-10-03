@@ -30,7 +30,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star
 
-from . import games, games_extra, games_plus
+from . import games, games_extra, games_plus, games_tags, games_world
 from .games import ChainGame, GuessGame
 from .store import InteractionStore
 
@@ -168,6 +168,40 @@ COMMAND_NAMES: tuple[str, ...] = (
     "rank",
     "玩法",
     "状态",
+    # ---- v1.3.0 新增指令与别名：世界线 / 赛季 / 养成 ----
+    "讨伐",
+    "开boss",
+    "群boss",
+    "讨伐状态",
+    "boss状态",
+    "赛季",
+    "本季",
+    "宠物",
+    "养宠",
+    "喂食",
+    "照料",
+    "撸宠",
+    "起名",
+    "宠物起名",
+    "改名",
+    "攻击",
+    "输出",
+    "砍",
+    "boss",
+    "season",
+    "pet",
+    "feed",
+    "petname",
+    "attack",
+    # ---- v1.3.0 新增指令与别名：标签体系 ----
+    "标签",
+    "成就标签",
+    "收集",
+    "标签搜索",
+    "搜标签",
+    "tags",
+    "collection",
+    "tagsearch",
     # ---- v1.2.0 新增指令与别名 ----
     "我的加成",
     "成就列表",
@@ -331,6 +365,8 @@ class InteractionPlugin(Star):
         self._mines: dict[str, games_plus.MinefieldGame] = {}
         self._codes: dict[str, games_plus.CodebreakerGame] = {}
         self._duels: dict[str, dict[str, Any]] = {}
+        # 第三批扩展玩法状态（按会话隔离）
+        self._bosses: dict[str, games_world.BossFight] = {}
         self._build_dispatch()
 
     # ------------------------------------------------------------------ 生命周期
@@ -672,6 +708,17 @@ class InteractionPlugin(Star):
 
         # 第二批扩展：成长类
         reg(self.cmd_achievements, "成就", "成就列表", "achieve", "achievements")
+        reg(self.cmd_tags, "标签", "成就标签", "收集", "tags", "collection")
+        reg(self.cmd_tag_search, "标签搜索", "搜标签", "tagsearch")
+
+        # 第三批扩展：世界线 / 赛季 / 养成
+        reg(self.cmd_boss, "讨伐", "开boss", "boss", "群boss")
+        reg(self.cmd_boss_attack, "攻击", "输出", "砍", "attack")
+        reg(self.cmd_boss_info, "讨伐状态", "boss状态")
+        reg(self.cmd_season, "赛季", "season", "本季")
+        reg(self.cmd_pet, "宠物", "pet", "养宠")
+        reg(self.cmd_pet_feed, "喂食", "照料", "feed", "撸宠")
+        reg(self.cmd_pet_name, "起名", "改名", "petname")
         reg(self.cmd_rebirth, "转生", "重生", "rebirth")
         reg(self.cmd_bonus, "我的加成", "加成", "bonus")
 
@@ -960,6 +1007,11 @@ class InteractionPlugin(Star):
                     k: g
                     for k, g in self._wagers.items()
                     if now - g.started_at < g.duration + _WAGER_GRACE
+                }
+                self._bosses = {
+                    k: g
+                    for k, g in self._bosses.items()
+                    if now - g.started_at < _BOARD_TTL
                 }
                 self.store.prune_polls(POLL_KEEP, now)
                 if len(self._cooldown) > _COOLDOWN_MAX:
@@ -1519,6 +1571,16 @@ class InteractionPlugin(Star):
         "wheel": "wheel_count",
         "抛硬币": "coin_win",
         "coin": "coin_win",
+        # ---- v1.3.0 新增维度 ----
+        "boss伤害": "boss_damage",
+        "boss输出": "boss_damage",
+        "boss": "boss_damage",
+        "boss击杀": "boss_kill",
+        "击杀": "boss_kill",
+        "本赛季积分": "season_gain",
+        "赛季": "season_gain",
+        "season": "season_gain",
+        "赛季奖励": "season_reward",
     }
     _RANK_TITLES: dict[str, str] = {
         "balance": "积分",
@@ -1535,6 +1597,11 @@ class InteractionPlugin(Star):
         "wager_win": "竞猜猜中",
         "wheel_count": "大转盘",
         "coin_win": "抛硬币",
+        # ---- v1.3.0 新增维度 ----
+        "boss_damage": "Boss 伤害",
+        "boss_kill": "Boss 击杀",
+        "season_gain": "本赛季积分",
+        "season_reward": "赛季奖励",
     }
 
     @filter.command("排行榜", alias={"排行", "rank", "榜单"})
@@ -1771,6 +1838,11 @@ class InteractionPlugin(Star):
             "\n"
             "【成长】\n"
             "成就 ｜ 转生 [确认] ｜ 我的加成（含今日折扣）\n"
+            "标签 [稀有|分类|已获得] ｜ 标签搜索 <关键词>\n"
+            "赛季 → 赛季 领取 ｜ 宠物 → 喂食 / 起名 <名字>\n"
+            "\n"
+            "【世界线】\n"
+            "讨伐 [Boss名] → 攻击 <积分> → 讨伐状态（全群协作，按伤害分配奖池）\n"
             "\n"
             "【工具】\n"
             "投票 问题 | 选项1 | 选项2 → 投 <编号> <序号> → 投票结果 [编号]\n"
@@ -3230,15 +3302,181 @@ class InteractionPlugin(Star):
         target = self._resolve_uid(args.strip() or self._args(event)) or str(
             event.get_sender_id()
         )
-        user = self.store.get_user(key, target)
         name = self.store.display_name(key, target)
-        rows = games_plus.achievement_progress(user)
-        done = sum(1 for _c, _n, _cur, _th, ok in rows if ok)
-        lines = [f"🏅 {name} 的成就（{done}/{len(rows)}）"]
-        for _code, title, current, threshold, ok in rows:
-            mark = "✅" if ok else "⏳"
-            lines.append(f"{mark} {title}（{current}/{threshold}）")
+        entries = self._tag_entries(key, target)
+        info = games_tags.summarize(entries)
+        lines = [
+            f"🏅 {name} 的成就（{info['unlocked']}/{info['total']}）",
+            games_tags.render_summary(entries),
+            "",
+        ]
+        for entry in entries:
+            mark = "✅" if entry.unlocked else "⏳"
+            badge = games_tags.rarity_badge(entry.rarity)
+            if entry.unlocked:
+                lines.append(f"{mark}{badge} {entry.name}（+{entry.reward}）")
+            else:
+                lines.append(
+                    f"{mark}{badge} {entry.name}（{entry.current}/{entry.threshold}）"
+                )
+        lines.append("")
+        lines.append("按稀有度/分类筛选：标签 稀有｜标签 日常｜标签 搜索 抽奖")
         return event.plain_result("\n".join(lines))
+
+    # ------------------------------------------------------------------ 标签体系（v1.3.0）
+
+    def _tag_entries(self, key: str, uid: str) -> list[games_tags.TagEntry]:
+        """构造某个用户的标签条目列表。
+
+        Args:
+            key: 会话标识。
+            uid: 用户 ID。
+
+        Returns:
+            标签条目列表（分类与稀有度已补齐）。
+        """
+        user = self.store.get_user(key, uid)
+        return games_tags.build_entries(
+            games_plus.ACHIEVEMENTS,
+            user,
+            categories=games_plus.ACHIEVEMENT_CATEGORIES,
+            unlocked_at=games_plus.achievement_unlocked_at(user),
+        )
+
+    @filter.command("标签", alias={"成就标签", "收集", "tags", "collection"})
+    async def cmd_tags(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """查看标签（成就徽章）收集情况，支持筛选与排序。
+
+        用法：
+            标签                     —— 概览 + 未完成清单
+            标签 稀有                —— 只看某个稀有度
+            标签 日常                —— 只看某个分类
+            标签 已获得              —— 只看已解锁
+            标签 搜索 签到           —— 关键词搜索
+            标签 稀有 搜索 抽奖      —— 组合筛选（顺序不限）
+        """
+        if reason := self._guard(event):
+            return self._deny(reason)
+        key = self._session_key(event)
+        raw = (args.strip() or self._args(event).strip()).strip()
+        target = self._resolve_uid(raw) or str(event.get_sender_id())
+        name = self.store.display_name(key, target)
+        entries = self._tag_entries(key, target)
+
+        query, category, rarity, only_locked, only_unlocked = self._parse_tag_args(raw)
+        shown = games_tags.filter_entries(
+            entries,
+            query=query,
+            category=category,
+            rarity=rarity,
+            only_locked=only_locked,
+            only_unlocked=only_unlocked,
+        )
+
+        head = f"🏷️ @{name} 的标签收集"
+        if not (query or category or rarity or only_locked or only_unlocked):
+            lines = [head, games_tags.render_summary(entries), ""]
+            pending = games_tags.filter_entries(entries, only_locked=True)
+            pending = games_tags.sort_entries(pending, by="progress", descending=False)
+            lines.append("📌 最接近完成：")
+            lines.append(games_tags.render_list(pending, limit=5))
+            lines.append("")
+            lines.append("筛选：标签 稀有｜标签 日常｜标签 已获得｜标签 搜索 关键词")
+            return event.plain_result("\n".join(lines))
+
+        filter_desc = self._describe_tag_filter(query, category, rarity, only_unlocked)
+        lines = [f"{head} · {filter_desc}", games_tags.render_list(shown, limit=20)]
+        return event.plain_result("\n".join(lines))
+
+    @filter.command("标签搜索", alias={"搜标签", "tagsearch"})
+    async def cmd_tag_search(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """按关键词搜索标签，等价于「标签 搜索 <关键词>」。
+
+        Args:
+            args: 关键词。
+        """
+        raw = args.strip() or self._args(event).strip()
+        if not raw:
+            return event.plain_result(
+                "用法：标签搜索 <关键词>，例如「标签搜索 抽奖」。"
+                "也可以直接「标签 <分类|稀有度>」筛选。"
+            )
+        return await self.cmd_tags(event, f"搜索 {raw}")
+
+    def _parse_tag_args(self, raw: str) -> tuple[str, str, str, bool, bool]:
+        """解析标签指令的参数。
+
+        参数是自由词序的 —— 用户既可能写「标签 稀有 搜索 抽奖」，也可能写
+        「标签 搜索 抽奖 稀有」。所以这里逐词判定类别，而不是按位置取参。
+        「搜索」之后的所有词都归入关键词。
+
+        Args:
+            raw: 原始参数文本。
+
+        Returns:
+            ``(关键词, 分类, 稀有度, 只看未获得, 只看已获得)``。
+        """
+        tokens = (raw or "").split()
+        query_parts: list[str] = []
+        category = ""
+        rarity = ""
+        only_locked = False
+        only_unlocked = False
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            norm = games_tags.normalize_query(token)
+            if norm in ("搜索", "search", "查"):
+                # 「搜索」之后的内容统一作为关键词，保留原始空白
+                query_parts.extend(tokens[i + 1 :])
+                break
+            if norm in ("已获得", "已解锁", "获得", "解锁", "unlocked"):
+                only_unlocked = True
+            elif norm in ("未获得", "未解锁", "未完成", "locked"):
+                only_locked = True
+            elif games_tags.is_category(norm):
+                # 统一存「码」而不是「名」，后续展示与筛选都按码处理
+                category = games_tags.resolve_category(norm)
+            elif games_tags.is_rarity(norm):
+                rarity = games_tags.resolve_rarity(norm)
+            else:
+                query_parts.append(token)
+            i += 1
+        return " ".join(query_parts), category, rarity, only_locked, only_unlocked
+
+    def _describe_tag_filter(
+        self,
+        query: str,
+        category: str,
+        rarity: str,
+        only_unlocked: bool,
+    ) -> str:
+        """把筛选条件拼成人类可读的说明。
+
+        Args:
+            query: 关键词。
+            category: 分类码。
+            rarity: 稀有度码。
+            only_unlocked: 是否只看已获得。
+
+        Returns:
+            筛选说明文本。
+        """
+        parts: list[str] = []
+        if query:
+            # 展示归一化后的词：用户写的是「签到！」，提示里不该带着标点
+            parts.append(f"关键词「{games_tags.normalize_query(query)}」")
+        if category:
+            parts.append(games_tags.category_name(category))
+        if rarity:
+            parts.append(games_tags.rarity_name(rarity))
+        if only_unlocked:
+            parts.append("已获得")
+        return " / ".join(parts) if parts else "全部"
 
     @filter.command("转生", alias={"重生", "rebirth", "reset等级"})
     async def cmd_rebirth(
@@ -3282,14 +3520,366 @@ class InteractionPlugin(Star):
         user["name"] = name
         times = int(user.get("rebirth", 0) or 0)
         percent = self._discount(event)
-        rows = games_plus.achievement_progress(user)
-        done = sum(1 for *_rest, ok in rows if ok)
+        info = games_tags.summarize(self._tag_entries(key, uid))
+        pet_code, pet_name, pet_bonus = games_world.pet_stage(
+            games_world.PetState.from_dict(user.get("pet")).care
+        )
+        season = games_world.season_of(games.today_str())
+        self._season_sync(user, season)
+        gain = int(user.get("season_gain", 0) or 0)
+        stage, _next, _remain = games_world.season_progress(gain)
         return event.plain_result(
             f"⚡ @{name} 的加成\n"
             f"转生 {times} 次｜收益加成 ×{games_plus.rebirth_bonus(times):.2f}\n"
-            f"成就 {done}/{len(rows)}\n"
+            f"标签 {info['unlocked']}/{info['total']}（{info['percent']}%）\n"
+            f"赛季 {season}｜段位 {stage}｜本季增量 {gain}\n"
+            f"宠物 {pet_name}（产出 +{pet_bonus}）\n"
             f"今日折扣：{games_plus.discount_text(percent)}"
         )
+
+    # ------------------------------------------------------------------ 第三批扩展：世界线 / 赛季 / 养成（v1.3.0）
+
+    @filter.command("讨伐", alias={"开boss", "boss", "群boss"})
+    async def cmd_boss(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """开一局群 Boss 战，用法：讨伐 [boss名]。
+
+        Args:
+            args: 可选 Boss 名（史莱姆王 / 烈焰巨龙 / 深海巨妖 / 虚空利维坦）。
+        """
+        if reason := self._guard(event):
+            return self._deny(reason)
+        if not self._feature_on("boss", default=True):
+            return self._deny("群 Boss 战已关闭。")
+        key = self._session_key(event)
+        ongoing = self._bosses.get(key)
+        if ongoing is not None and not ongoing.finished:
+            lines = [
+                f"⚠️ 本群已在讨伐「{ongoing.name}」，先打完这一局。",
+                ongoing.render(),
+            ]
+            return event.plain_result("\n".join(lines))
+
+        want = (args.strip() or self._args(event).strip()).strip()
+        code = self._match_boss(want)
+        if want and code is None:
+            names = " / ".join(name for _c, name, *_r in games_world.BOSSES)
+            return event.plain_result(f"没有这个 Boss。可选：{names}")
+
+        fight = games_world.BossFight.create(
+            code or games_world.BOSSES[0][0], int(time.time())
+        )
+        self._bosses[key] = fight
+        _name, _hp, cost, pool, desc = games_world.BOSS_MAP[fight.code]
+        return event.plain_result(
+            f"🐲 群 Boss 战开始！\n"
+            f"{fight.render()}\n"
+            f"{desc}\n"
+            f"发送「攻击 <积分>」投入积分造成伤害（每 {cost} 积分 = 1 点伤害）。\n"
+            f"击杀后按伤害占比瓜分 {pool} {self._unit} 奖池。"
+        )
+
+    @filter.command("攻击", alias={"输出", "砍", "attack"})
+    async def cmd_boss_attack(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """对当前 Boss 发起攻击，用法：攻击 <积分>。
+
+        Args:
+            args: 投入积分。
+        """
+        if reason := self._guard(event):
+            return self._deny(reason)
+        key = self._session_key(event)
+        fight = self._bosses.get(key)
+        if fight is None or fight.finished:
+            return event.plain_result("本群没有进行中的讨伐，先发送「讨伐」开一局。")
+        uid, name = self._sender(event)
+        user = self.store.get_user(key, uid)
+        user["name"] = name
+
+        raw = (args.strip() or self._args(event).strip()).split()
+        spend = games.parse_amount(raw[0], 0) if raw else 0
+        if spend <= 0:
+            return event.plain_result("投入积分要大于 0，例如「攻击 100」。")
+        cap = max(1, self._int("boss", "max_spend", default=5000))
+        if spend > cap:
+            return event.plain_result(
+                f"单次攻击最多投入 {cap} {self._unit}，别一次梭哈。"
+            )
+        if spend > int(user.get("balance", 0) or 0):
+            return event.plain_result(
+                f"积分不足，你只有 {int(user.get('balance', 0) or 0)} {self._unit}。"
+            )
+
+        user["balance"] = int(user.get("balance", 0) or 0) - spend
+        dealt, remaining, killed = fight.attack(uid, spend)
+        if dealt <= 0:
+            # 投入不足以折算 1 点伤害：全额退回，不留沉默扣款
+            user["balance"] = int(user.get("balance", 0) or 0) + spend
+            need = max(1, fight.cost)
+            return event.plain_result(f"至少投入 {need} {self._unit} 才能造成伤害。")
+        # 溢出伤害要退款：Boss 只剩 10 滴血时你投入 5000，
+        # 只该按「实际打出的 10 点」收费，否则最后一下会被当冤大头。
+        billed = dealt * max(1, fight.cost)
+        refund = spend - billed
+        if refund > 0:
+            user["balance"] = int(user.get("balance", 0) or 0) + refund
+            spend = billed
+            fight.spenders[uid] = max(0, fight.spenders.get(uid, 0) - refund)
+
+        user["boss_damage"] = int(user.get("boss_damage", 0) or 0) + dealt
+        lines = [f"@{name} 造成 {dealt} 点伤害！"]
+
+        if not killed:
+            mine = fight.damages.get(uid, 0)
+            lines.append(fight.render())
+            lines.append(f"你的累计伤害 {mine}（投入 {fight.spenders.get(uid, 0)}）")
+            await self.store.save(key)
+            return event.plain_result("\n".join(lines))
+
+        share, killer = fight.settle()
+        mine = share.get(uid, 0)
+        for target_uid, amount in share.items():
+            self.store.add_balance(key, target_uid, amount)
+        # 所有参与者都要记功：只给「最后一击」算账会让先出手的人白打工
+        for target_uid in fight.damages:
+            record = self.store.get_user(key, target_uid)
+            record["boss_gold"] = int(record.get("boss_gold", 0) or 0) + share.get(
+                target_uid, 0
+            )
+            if target_uid == killer:
+                record["boss_kill"] = int(record.get("boss_kill", 0) or 0) + 1
+        self._bosses.pop(key, None)
+
+        # 全员结算后逐人复查成就，避免「只给补刀的人算账」
+        tail = self._achievement_scan(self.store.get_user(key, uid))
+        lines.append(
+            f"💥 {fight.name} 被击败了！最后一击：{self.store.display_name(key, killer)}"
+        )
+        lines.append(
+            f"你分得 {mine} {self._unit}（伤害占比 {fight.damages.get(uid, 0)}/{fight.total_damage}）"
+        )
+        if tail:
+            lines.append(tail.strip())
+        await self.store.save(key, force=True)
+        return event.plain_result("\n".join(lines))
+
+    @filter.command("讨伐状态", alias={"boss状态"})
+    async def cmd_boss_info(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """查看当前群 Boss 战进度与伤害榜。"""
+        if reason := self._guard(event):
+            return self._deny(reason)
+        key = self._session_key(event)
+        fight = self._bosses.get(key)
+        if fight is None:
+            names = " / ".join(name for _c, name, *_r in games_world.BOSSES)
+            return event.plain_result(f"本群没有进行中的讨伐。\n可选 Boss：{names}")
+        lines = [fight.render()]
+        if fight.damages:
+            rows = sorted(fight.damages.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
+            lines.append("📊 伤害榜：")
+            for uid, damage in rows:
+                lines.append(f"· {self.store.display_name(key, uid)} —— {damage}")
+        else:
+            lines.append("还没人出手，发送「攻击 <积分>」上啊！")
+        return event.plain_result("\n".join(lines))
+
+    @staticmethod
+    def _match_boss(text: str) -> str | None:
+        """把用户输入的 Boss 名/码匹配到 Boss 码。
+
+        Args:
+            text: 用户输入。
+
+        Returns:
+            Boss 码；无法匹配返回 ``None``。
+        """
+        want = "".join((text or "").split()).lower()
+        if not want:
+            return None
+        for code, name, *_rest in games_world.BOSSES:
+            if want in (code.lower(), name.lower()):
+                return code
+        for code, name, *_rest in games_world.BOSSES:
+            if want in code.lower() or want in name.lower():
+                return code
+        return None
+
+    @filter.command("赛季", alias={"season", "本季"})
+    async def cmd_season(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """查看本季赛季进度与预计奖励。"""
+        if reason := self._guard(event):
+            return self._deny(reason)
+        key = self._session_key(event)
+        uid, name = self._sender(event)
+        user = self.store.get_user(key, uid)
+        user["name"] = name
+        season = games_world.season_of(games.today_str())
+        self._season_sync(user, season)
+        gain = int(user.get("season_gain", 0) or 0)
+        stage, next_stage, remain = games_world.season_progress(gain)
+        reward = games_world.season_reward(gain)
+        claimed = int(user.get("season_reward", 0) or 0)
+        raw = (args.strip() or self._args(event).strip()).strip()
+
+        if raw in ("领取", "领奖", "claim", "领"):
+            if reward <= claimed:
+                return event.plain_result(
+                    f"@{name} 本季（{season}）没有可领的奖励，"
+                    f"当前段位「{stage}」已领满（已领 {claimed}）。"
+                )
+            diff = reward - claimed
+            user["season_reward"] = reward
+            self.store.add_balance(key, uid, diff)
+            self._achievement_scan(user)
+            await self.store.save(key, force=True)
+            return event.plain_result(
+                f"@{name} 领取了「{stage}」段位奖励 {diff} {self._unit}！\n"
+                f"当前余额 {int(user.get('balance', 0) or 0)} {self._unit}"
+            )
+
+        lines = [
+            f"🏆 @{name} 的赛季 · {season}",
+            f"本季积分增量 {gain}｜段位 {stage}",
+            (
+                f"距离「{next_stage}」还差 {remain} 积分"
+                if remain
+                else "已到最高段位，稳住！"
+            ),
+            f"结算可得 {reward} {self._unit}（已领 {claimed}）",
+        ]
+        if reward > claimed:
+            lines.append("发送「赛季 领取」立即领取当前段位奖励。")
+        elif reward:
+            lines.append("本季奖励已领满，继续冲下一段位吧。")
+        await self.store.save(key)
+        return event.plain_result("\n".join(lines))
+
+    def _season_sync(self, user: dict, season: str) -> None:
+        """在赛季切换时重置本季增量。
+
+        只重置「增量」而不动总积分，避免跨月时伤害玩家资产。
+
+        Args:
+            user: 用户档案（就地更新）。
+            season: 当前赛季标识。
+        """
+        if str(user.get("season_tag") or "") == season:
+            return
+        user["season_tag"] = season
+        user["season_gain"] = 0
+        user["season_reward"] = 0
+
+    @filter.command("宠物", alias={"pet", "养宠", "宠物状态"})
+    async def cmd_pet(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """领养 / 查看宠物。"""
+        if reason := self._guard(event):
+            return self._deny(reason)
+        if not self._feature_on("pet", default=True):
+            return self._deny("宠物玩法已关闭。")
+        key = self._session_key(event)
+        uid, name = self._sender(event)
+        user = self.store.get_user(key, uid)
+        user["name"] = name
+        pet = games_world.PetState.from_dict(user.get("pet"))
+        if not pet.born:
+            pet.born = int(time.time())
+            user["pet"] = pet.to_dict()
+            await self.store.save(key)
+            return event.plain_result(
+                f"@{name} 你领养了一只宠物蛋！\n"
+                f"发送「喂食」照料它，或「起名 <名字>」给它取名。"
+            )
+        now = int(time.time())
+        ready = pet.next_feed_at(now)
+        lines = [f"@{name} 的宠物", pet.describe()]
+        if ready > now:
+            wait = games.format_duration(ready - now)
+            lines.append(f"⏳ 还要 {wait} 才能再照料。")
+        else:
+            lines.append("可以喂食啦，发送「喂食」照顾它。")
+        return event.plain_result("\n".join(lines))
+
+    @filter.command("喂食", alias={"照料", "feed", "撸宠"})
+    async def cmd_pet_feed(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """照料宠物一次（有冷却）。"""
+        if reason := self._guard(event):
+            return self._deny(reason)
+        if not self._feature_on("pet", default=True):
+            return self._deny("宠物玩法已关闭。")
+        key = self._session_key(event)
+        uid, name = self._sender(event)
+        user = self.store.get_user(key, uid)
+        user["name"] = name
+        pet = games_world.PetState.from_dict(user.get("pet"))
+        now = int(time.time())
+        if not pet.born:
+            return event.plain_result("你还没有宠物，先发送「宠物」领养一只。")
+        ready = pet.next_feed_at(now)
+        if ready > now:
+            wait = games.format_duration(ready - now)
+            return event.plain_result(f"@{name} 别喂太急啦，还要 {wait} 才能再照料。")
+
+        before_code, before_name, _b = games_world.pet_stage(pet.care)
+        pet.care += 1
+        pet.fed_at = now
+        user["pet"] = pet.to_dict()
+        gain = games_world.pet_gain(pet.care, self._rng)
+        if gain:
+            user["balance"] = int(user.get("balance", 0) or 0) + gain
+        after_code, after_name, bonus = games_world.pet_stage(pet.care)
+        lines = [
+            f"@{name} 照料了「{pet.name or '未命名'}」",
+            f"获得 {gain} {self._unit}（当前余额 {int(user.get('balance', 0) or 0)}）",
+        ]
+        if after_code != before_code:
+            lines.append(
+                f"🎉 成长啦：{before_name} → {after_name}（每日产出 +{bonus}）"
+            )
+        else:
+            next_name, remain = games_world.pet_need(pet.care)
+            if remain:
+                lines.append(f"距离「{next_name}」还差 {remain} 次照料")
+        await self.store.save(key)
+        return event.plain_result("\n".join(lines))
+
+    @filter.command("起名", alias={"宠物起名", "改名", "petname"})
+    async def cmd_pet_name(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """给宠物起名，用法：起名 <名字>。
+
+        Args:
+            args: 新名字（1~12 字）。
+        """
+        if reason := self._guard(event):
+            return self._deny(reason)
+        key = self._session_key(event)
+        uid, name = self._sender(event)
+        user = self.store.get_user(key, uid)
+        user["name"] = name
+        pet = games_world.PetState.from_dict(user.get("pet"))
+        if not pet.born:
+            return event.plain_result("你还没有宠物，先发送「宠物」领养一只。")
+        raw = (args.strip() or self._args(event).strip()).strip()
+        if not raw:
+            return event.plain_result("用法：起名 <名字>，例如「起名 小互动」。")
+        if len(raw) > 12:
+            return event.plain_result("名字太长了，12 个字以内吧。")
+        pet.name = raw
+        user["pet"] = pet.to_dict()
+        await self.store.save(key)
+        return event.plain_result(f"@{name} 宠物已改名为「{raw}」。")
 
     # ------------------------------------------------------------------ 扩展玩法：小工具
 

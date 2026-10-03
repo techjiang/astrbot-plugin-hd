@@ -153,3 +153,41 @@ class TestDispatchCoverage:
             hit = plugin._resolve_command(text)
             assert hit is not None, text
             assert hit[1] == expect, (text, hit[1], expect)
+
+
+class TestRankAliasCoverage:
+    """``_RANK_TITLES`` 与 ``_RANK_ALIASES`` 的同步契约。
+
+    排行榜的展示文案取自 ``_RANK_TITLES``，而用户能输入的维度取自
+    ``_RANK_ALIASES``。两者一旦脱节，就会出现两类静默 bug：
+
+    - ``_RANK_ALIASES`` 映射到一个 ``_RANK_TITLES`` 里没有的字段 →
+      ``top_users`` 取不到数据，永远回「还没有数据」；
+    - 新增了 ``_RANK_TITLES`` 维度却忘了加别名 → 用户按提示输入却报「可排行维度」。
+
+    两种都「不报错」，所以用结构断言锁死。
+    """
+
+    def test_every_alias_target_exists_in_titles(self):
+        titles = set(plugin_main.InteractionPlugin._RANK_TITLES)
+        targets = set(plugin_main.InteractionPlugin._RANK_ALIASES.values())
+        missing = sorted(targets - titles)
+        assert not missing, f"以下排行维度没有展示名（_RANK_TITLES 缺失）：{missing}"
+
+    def test_every_title_is_reachable_by_some_alias(self):
+        titles = set(plugin_main.InteractionPlugin._RANK_TITLES)
+        targets = set(plugin_main.InteractionPlugin._RANK_ALIASES.values())
+        unreachable = sorted(titles - targets)
+        assert not unreachable, (
+            f"以下排行维度没有任何输入别名，用户按提示输入也会报错：{unreachable}"
+        )
+
+    def test_titles_include_help_text_dimensions(self):
+        """帮助文本里列出的维度必须都能真的解析出来。
+
+        帮助文案是从 ``_RANK_TITLES`` 拼出来的，这里反向验证每个展示名
+        至少能通过一个别名命中，避免「帮助里写了但用不了」。
+        """
+        plugin_aliases = plugin_main.InteractionPlugin._RANK_ALIASES
+        for field_name, title in plugin_main.InteractionPlugin._RANK_TITLES.items():
+            assert field_name in plugin_aliases.values(), title

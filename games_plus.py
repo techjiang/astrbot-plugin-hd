@@ -891,6 +891,37 @@ ACHIEVEMENT_MAP: dict[str, tuple[str, str, int, int]] = {
     for code, name, field_name, threshold, reward in ACHIEVEMENTS
 }
 
+# 成就码 -> 标签分类码。分类码定义见 ``games_tags.CATEGORIES``。
+#
+# 单独放一张表而不是塞进 ``ACHIEVEMENTS`` 元组，是为了不破坏已有的
+# 4 元组解包（主逻辑与测试里有大量 ``for _code, name, cur, th, ok in ...``）。
+# 新增成就若忘记登记，``games_tags.build_entries`` 会归入 ``game`` 默认分类，
+# ``tests/test_tags.py`` 里有断言保证两者严格对齐。
+ACHIEVEMENT_CATEGORIES: dict[str, str] = {
+    "checkin_7": "daily",
+    "checkin_30": "daily",
+    "rich_1k": "wealth",
+    "rich_1w": "wealth",
+    "rich_10w": "wealth",
+    "lottery_50": "luck",
+    "lottery_500": "luck",
+    "guess_30": "game",
+    "chain_50": "game",
+    "dice_100": "luck",
+    "rob_20": "social",
+    "bj_30": "game",
+    "duel_30": "social",
+    "riddle_20": "explore",
+    "soup_10": "explore",
+    "ttt_10": "game",
+    "mine_10": "game",
+    "code_5": "explore",
+    "coin_5": "luck",
+    "wager_5": "luck",
+    "gift_50": "social",
+    "confess_10": "social",
+}
+
 
 def achievement_progress(user: dict) -> list[tuple[str, str, int, int, bool]]:
     """计算全部成就的进度。
@@ -929,6 +960,11 @@ def check_achievements(
     owned = set(user.get("achievements") or [])
     gained: list[tuple[str, str, int]] = []
     total = 0
+    now = int(time.time())
+    stamps = user.get("achievement_ts")
+    if not isinstance(stamps, dict):
+        stamps = {}
+        user["achievement_ts"] = stamps
     for code, name, field_name, threshold, reward in ACHIEVEMENTS:
         if code in owned:
             continue
@@ -936,10 +972,36 @@ def check_achievements(
             owned.add(code)
             gained.append((code, name, reward))
             total += reward
+            stamps.setdefault(code, now)
     if gained:
         user["achievements"] = sorted(owned)
         user["balance"] = _safe_int(user.get("balance", 0), 0) + total
     return gained, total
+
+
+def achievement_unlocked_at(user: dict) -> dict[str, int]:
+    """读取成就的解锁时间戳表。
+
+    ``achievement_ts`` 是 v1.3.0 才引入的字段，老数据里没有；此时返回空表，
+    调用方（``games_tags``）会把时间视为未知，而不是伪造一个 ``0`` 时间。
+
+    Args:
+        user: 用户档案。
+
+    Returns:
+        成就码 -> unix 时间戳（秒）。非法的值会被剔除。
+    """
+    raw = user.get("achievement_ts")
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, int] = {}
+    for code, value in raw.items():
+        if not isinstance(code, str):
+            continue
+        stamp = _safe_int(value, 0)
+        if stamp > 0:
+            result[code] = stamp
+    return result
 
 
 # --------------------------------------------------------------------- 每日折扣
