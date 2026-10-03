@@ -325,10 +325,43 @@ async def test_guard_blocks_private_chat(plugin):
 
 
 @pytest.mark.asyncio
-async def test_guard_cooldown(plugin):
+async def test_guard_cooldown_is_per_command(plugin):
+    """冷却必须按「会话+用户+指令」隔离，而不是整个插件共用一个时间戳。
+
+    历史 bug：``_guard`` 只用 ``会话:用户`` 做 key，导致群里先发「签到」
+    再发「积分」，第二条必然落在同一个冷却窗口里被拒 —— 用户看到的
+    就是「不管发什么都是操作太快啦」。本用例锁死两件事：
+
+    1. 同一条指令连点会被冷却拦下；
+    2. 不同指令互不影响。
+    """
     plugin.config["permission"]["cooldown_seconds"] = 60
-    await run(plugin, "cmd_sign", make_event("签到"))
-    assert "太快" in await run(plugin, "cmd_balance", make_event("积分"))
+
+    # 第一条放行，第二条同一指令被拦
+    assert "太快" not in await run(plugin, "cmd_sign", make_event("签到"))
+    assert "太快" in await run(plugin, "cmd_sign", make_event("签到"))
+
+    # 换一条指令：不受上一条的冷却时间戳影响
+    assert "太快" not in await run(plugin, "cmd_balance", make_event("积分"))
+    assert "太快" not in await run(plugin, "cmd_rank", make_event("排行榜"))
+
+
+@pytest.mark.asyncio
+async def test_guard_cooldown_default_is_zero(plugin):
+    """默认配置下不该有任何冷却，否则真人手速会连吃拒绝。"""
+    plugin.config["permission"].pop("cooldown_seconds", None)
+    for _ in range(3):
+        assert "太快" not in await run(plugin, "cmd_sign", make_event("签到"))
+        assert "太快" not in await run(plugin, "cmd_balance", make_event("积分"))
+
+
+@pytest.mark.asyncio
+async def test_guard_never_cools_down_readonly_commands(plugin):
+    """查询类指令（积分/排行榜/帮助等）即使配了冷却也不该被限流。"""
+    plugin.config["permission"]["cooldown_seconds"] = 60
+    for _ in range(3):
+        assert "太快" not in await run(plugin, "cmd_balance", make_event("积分"))
+        assert "太快" not in await run(plugin, "cmd_rank", make_event("排行榜"))
 
 
 @pytest.mark.asyncio

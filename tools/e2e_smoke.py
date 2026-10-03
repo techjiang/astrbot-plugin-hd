@@ -892,14 +892,260 @@ async def main() -> int:
     ach_out = await run("成就-带稀有度", "成就", ("成就",), handler="cmd_achievements")
     assert "稀有" in ach_out or "传说" in ach_out, ach_out
 
+    # ---------- 3c) 第四批扩展：拍卖 / 拔河 / 竞速 / 大富翁 / 战队 ----------
+    # 拍卖：先给卖家一件道具 -> 发起 -> 出价 -> 落槌，验完整闭环
+    seller, buyer, bystander = "8001", "8002", "8003"
+    # 先给三位参与者发点本钱（走真实加余额接口，避免直接改档案）
+    for _uid, _amount in ((seller, 500), (buyer, 500), (bystander, 200)):
+        plugin.store.add_balance("aiocqhttp_group_888", _uid, _amount)
+    await run(
+        "拍卖-前置购买", "购买 幸运符", ("购买成功",), handler="cmd_buy", uid=seller
+    )
+    await run(
+        "拍卖-发起",
+        "拍卖 幸运符 10 60",
+        ("发起拍卖",),
+        handler="cmd_auction",
+        uid=seller,
+    )
+    await run("拍卖-出价", "出价 30", ("出价成功",), handler="cmd_bid", uid=buyer)
+    await run(
+        "拍卖-低价被拒",
+        "出价 20",
+        ("要高于当前最高价",),
+        handler="cmd_bid",
+        uid=bystander,
+    )
+    await run(
+        "拍卖-余额不足", "出价 999999", ("余额",), handler="cmd_bid", uid=bystander
+    )
+    seller_before = plugin.store.get_user("aiocqhttp_group_888", seller)["balance"]
+    buyer_before = plugin.store.get_user("aiocqhttp_group_888", buyer)["balance"]
+    await run("拍卖-落槌", "落槌", ("成交", buyer), handler="cmd_hammer", uid=seller)
+    # 结算后余额真的动了：买家 -30、卖家 +30，且总和不凭空增加（零和转移）
+    seller_after = plugin.store.get_user("aiocqhttp_group_888", seller)["balance"]
+    buyer_after = plugin.store.get_user("aiocqhttp_group_888", buyer)["balance"]
+    assert buyer_after == buyer_before - 30, (buyer_before, buyer_after)
+    assert seller_after == seller_before + 30, (seller_before, seller_after)
+    assert seller_after + buyer_after == seller_before + buyer_before, "拍卖凭空造分！"
+    print("  拍卖成交闭环 ✅（零和转移，总积分不变）")
+
+    # 拔河：两队各投力量 -> 结算，胜方成员存在
+    await run("拔河-开局", "拔河 红队 蓝队 60 20", ("拔河开始",), handler="cmd_tug")
+    await run(
+        "拔河-加入A",
+        "加入 红队 100",
+        ("加入了", "红队"),
+        handler="cmd_join",
+        uid="8101",
+    )
+    await run(
+        "拔河-加入B", "加入 蓝队 50", ("加入了", "蓝队"), handler="cmd_join", uid="8102"
+    )
+    await run(
+        "拔河-不可换队",
+        "加入 蓝队 10",
+        ("不能中途换队",),
+        handler="cmd_join",
+        uid="8101",
+    )
+    await run(
+        "拔河-队名错误", "加入 黄队 10", ("没有",), handler="cmd_join", uid="8103"
+    )
+    await run(
+        "拔河-无局加入",
+        "加入 红队 10",
+        ("没有进行中的拔河",),
+        handler="cmd_join",
+        uid="8104",
+        gid="889",
+    )
+
+    # 知识竞速：出题 -> 答错（进入锁定）-> 答对 -> 拿奖励
+    quiz_out = await run("竞速-出题", "竞速", ("知识竞速",), handler="cmd_quiz")
+    quiz = plugin._quizzes["aiocqhttp_group_888"]
+    await run(
+        "竞速-答错", "答题 一定不对", ("不对哦",), handler="cmd_answer", uid="8201"
+    )
+    await run(
+        "竞速-锁定",
+        "答题 一定不对",
+        ("等", "才能再答"),
+        handler="cmd_answer",
+        uid="8201",
+    )
+    await run(
+        "竞速-答对",
+        f"答题 {quiz.answers[0]}",
+        ("答对",),
+        handler="cmd_answer",
+        uid="8202",
+    )
+    await run(
+        "竞速-已结束", "答题 随便", ("没有进行中",), handler="cmd_answer", uid="8203"
+    )
+    assert quiz_out  # 出题文本非空
+
+    # 大富翁：走格子，多次掷骰后余额与格子状态都被更新
+    run_out = await run(
+        "大富翁", "大富翁 5", ("前进",), handler="cmd_monopoly", uid="8301"
+    )
+    assert "互动币" in run_out
+    await run("大富翁-多次", "大富翁 10", ("前进",), handler="cmd_monopoly", uid="8301")
+
+    # 战队：列表为空 -> 创建 -> 加入 -> 列表出现 -> 离开
+    await run("战队-空", "战队", ("还没有战队",), handler="cmd_squad", gid="890")
+    await run(
+        "战队-创建",
+        "战队 创建 摸鱼队",
+        ("创建了战队",),
+        handler="cmd_squad",
+        uid="8401",
+        gid="890",
+    )
+    await run(
+        "战队-重复创建",
+        "战队 创建 摸鱼队",
+        ("已经存在",),
+        handler="cmd_squad",
+        uid="8401",
+        gid="890",
+    )
+    await run(
+        "战队-加入",
+        "战队 加入 摸鱼队",
+        ("加入了",),
+        handler="cmd_squad",
+        uid="8402",
+        gid="890",
+    )
+    await run(
+        "战队-不存在的队",
+        "战队 加入 摸鱼二队",
+        ("没有",),
+        handler="cmd_squad",
+        uid="8403",
+        gid="890",
+    )
+    squad_out = await run(
+        "战队-列表", "战队", ("摸鱼队",), handler="cmd_squad", uid="8401", gid="890"
+    )
+    assert (
+        "🌱" in squad_out or "🌿" in squad_out or "🌳" in squad_out or "🏔" in squad_out
+    )
+    await run(
+        "战队-离开",
+        "战队 离开",
+        ("已离开",),
+        handler="cmd_squad",
+        uid="8402",
+        gid="890",
+    )
+    await run(
+        "战队-未加入离开",
+        "战队 离开",
+        ("还没有加入",),
+        handler="cmd_squad",
+        uid="8403",
+        gid="890",
+    )
+
+    # 拔河手动结算：胜方每人拿奖金，且总发放 = 人数 * prize
+    # 先把上一场（红队/蓝队）收掉，否则新开局会被「已有进行中的拔河」挡下
+    await run("拔河-收掉上一场", "收工", ("获胜",), handler="cmd_settle")
+    await run(
+        "拔河-再开",
+        "拔河 甲队 乙队 60 30",
+        ("拔河开始",),
+        handler="cmd_tug",
+        uid="8150",
+    )
+    await run(
+        "拔河-甲加入", "加入 甲队 80", ("加入了",), handler="cmd_join", uid="8151"
+    )
+    await run(
+        "拔河-乙加入", "加入 乙队 20", ("加入了",), handler="cmd_join", uid="8152"
+    )
+    win_before = plugin.store.get_user("aiocqhttp_group_888", "8151")["balance"]
+    await run("拔河-手动结算", "收工", ("获胜",), handler="cmd_settle")
+    win_after = plugin.store.get_user("aiocqhttp_group_888", "8151")["balance"]
+    assert win_after == win_before + 30, (win_before, win_after)
+    await run("拔河-重复结算", "收工", ("没有进行中的拔河",), handler="cmd_settle")
+    print("  拔河结算发放正确 ✅")
+
+    # 免唤醒自动接管：知识竞速答对、拍卖到点自动落槌
+    await run(
+        "竞速-自动接管出题", "竞速", ("知识竞速",), handler="cmd_quiz", uid="8160"
+    )
+    q2 = plugin._quizzes["aiocqhttp_group_888"]
+    ev_auto = make_event("", uid="8161")
+    ev_auto.message_str = q2.answers[0]
+    handled = await plugin._auto_game(ev_auto, q2.answers[0])
+    assert handled, "知识竞速未被免前缀自动接管"
+    print("  知识竞速免前缀自动接管 ✅")
+
+    # 拍卖到点自动落槌：把时长调到 0，再发一条任意消息触发
+    plugin.store.add_balance("aiocqhttp_group_888", "8170", 300)
+    plugin.store.add_balance("aiocqhttp_group_888", "8171", 300)
+    await run(
+        "拍卖-自动前置购买",
+        "购买 赛博咖啡",
+        ("购买成功",),
+        handler="cmd_buy",
+        uid="8170",
+    )
+    await run(
+        "拍卖-自动发起",
+        "拍卖 赛博咖啡 5 60",
+        ("发起拍卖",),
+        handler="cmd_auction",
+        uid="8170",
+    )
+    await run("拍卖-自动出价", "出价 8", ("出价成功",), handler="cmd_bid", uid="8171")
+    plugin._auctions["aiocqhttp_group_888"].started_at -= 9999  # 强制过期
+    ev_exp = make_event("", uid="8171")
+    ev_exp.message_str = "随便一句"
+    handled = await plugin._auto_game(ev_exp, "随便一句")
+    assert handled, "过期拍卖未被自动结算"
+    assert "aiocqhttp_group_888" not in plugin._auctions
+    print("  拍卖到点自动落槌 ✅")
+
+    # 脏配置：这几个新玩法关掉后应给提示而不是崩
+    for group, handler, label in (
+        ("auction", "cmd_auction", "拍卖"),
+        ("tug", "cmd_tug", "拔河"),
+        ("quiz", "cmd_quiz", "竞速"),
+        ("monopoly", "cmd_monopoly", "大富翁"),
+    ):
+        plugin.config.setdefault(group, {})["enabled"] = False
+        await run(f"{label}-关闭", label, ("已关闭",), handler=handler)
+        plugin.config[group]["enabled"] = True
+
+    # 脏参数：不应抛异常
+    for label, text, handler, uid in (
+        ("拍卖-无参数", "拍卖", "cmd_auction", "8501"),
+        ("拍卖-脏道具", "拍卖 不存在的东西 5", "cmd_auction", "8501"),
+        ("出价-脏金额", "出价 abc", "cmd_bid", "8501"),
+        ("拔河-单队", "拔河 红队", "cmd_tug", "8501"),
+        ("加入-脏力量", "加入 红队 abc", "cmd_join", "8501"),
+        ("竞速-空答案", "答题", "cmd_answer", "8501"),
+        ("大富翁-脏次数", "大富翁 abc", "cmd_monopoly", "8501"),
+        ("战队-未知操作", "战队 乱写", "cmd_squad", "8501"),
+    ):
+        await run(label, text, (), handler=handler, uid=uid)
+
     # ---------- 4) 守卫 ----------
     plugin.config["enabled"] = False
     await run("总开关关闭", "签到", ("已关闭",), handler="cmd_sign")
     plugin.config["enabled"] = True
     await run("私聊限制", "签到", ("仅在群聊",), handler="cmd_sign", gid="")
     plugin.config["permission"]["cooldown_seconds"] = 60
-    await h.call("cmd_sign", make_event("签到"))
-    await run("冷却", "积分", ("太快",), handler="cmd_balance")
+    # 冷却按「会话+用户+指令」隔离：同一指令连点被拦，不同指令互不影响。
+    # （历史 bug 是全局共用一个时间戳，导致「不管发什么都是操作太快」。）
+    await run("冷却-首条放行", "签到", (), handler="cmd_sign")
+    await run("冷却-同指令被拦", "签到", ("太快",), handler="cmd_sign")
+    await run("冷却-异指令放行", "抽奖", (), handler="cmd_lottery")
+    await run("冷却-查询类豁免", "积分", (), handler="cmd_balance")
     plugin.config["permission"]["cooldown_seconds"] = 0
 
     # ---------- 5) 脏配置兜底 ----------
