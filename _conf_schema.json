@@ -229,6 +229,113 @@
       }
     }
   },
+  "auction": {
+    "description": "拍卖行设置",
+    "type": "object",
+    "hint": "拍卖为积分零和转移：成交款从得标者转给发起人，系统不产出积分。",
+    "items": {
+      "enabled": {
+        "description": "启用拍卖行",
+        "type": "bool",
+        "default": true
+      },
+      "duration": {
+        "description": "默认拍卖时长（秒）",
+        "type": "int",
+        "default": 300,
+        "slider": {
+          "min": 60,
+          "max": 3600,
+          "step": 30
+        }
+      },
+      "min_increment": {
+        "description": "最小加价幅度",
+        "type": "int",
+        "default": 1,
+        "slider": {
+          "min": 1,
+          "max": 500,
+          "step": 1
+        }
+      }
+    }
+  },
+  "tug": {
+    "description": "团队拔河设置",
+    "type": "object",
+    "hint": "力量只用于比大小、不从账户扣分；胜方每人领固定奖金。",
+    "items": {
+      "enabled": {
+        "description": "启用拔河",
+        "type": "bool",
+        "default": true
+      },
+      "duration": {
+        "description": "默认时长（秒）",
+        "type": "int",
+        "default": 300,
+        "slider": {
+          "min": 30,
+          "max": 3600,
+          "step": 30
+        }
+      },
+      "prize": {
+        "description": "胜方每人奖金",
+        "type": "int",
+        "default": 50,
+        "slider": {
+          "min": 0,
+          "max": 5000,
+          "step": 10
+        }
+      }
+    }
+  },
+  "quiz": {
+    "description": "知识竞速设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用知识竞速",
+        "type": "bool",
+        "default": true
+      },
+      "timeout": {
+        "description": "单题时限（秒）",
+        "type": "int",
+        "default": 60,
+        "slider": {
+          "min": 10,
+          "max": 600,
+          "step": 5
+        }
+      },
+      "reward": {
+        "description": "答对奖励积分",
+        "type": "int",
+        "default": 25,
+        "slider": {
+          "min": 0,
+          "max": 1000,
+          "step": 5
+        }
+      }
+    }
+  },
+  "monopoly": {
+    "description": "掷骰大富翁设置",
+    "type": "object",
+    "hint": "棋盘走完一圈净收益为负（约 -5/圈），刻意设计成通缩，防止刷分。",
+    "items": {
+      "enabled": {
+        "description": "启用大富翁",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
   "rank": {
     "description": "排行榜设置",
     "type": "object",
@@ -557,14 +664,15 @@
         "default": true
       },
       "cooldown_seconds": {
-        "description": "指令全局冷却（秒/人）",
+        "description": "单条指令冷却（秒/人）",
         "type": "int",
-        "default": 1,
+        "default": 0,
         "slider": {
           "min": 0,
           "max": 60,
           "step": 1
-        }
+        },
+        "hint": "同一条指令的连点间隔限制，按「会话+用户+指令」各自计时；不同指令之间互不影响。0 表示不限流。注意：查询类指令（积分/排行榜/背包/帮助等）始终不受此限制。"
       },
       "allow_list": {
         "description": "白名单用户 ID",

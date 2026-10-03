@@ -30,7 +30,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star
 
-from . import games, games_extra, games_plus, games_tags, games_world
+from . import games, games_arena, games_extra, games_plus, games_tags, games_world
 from .games import ChainGame, GuessGame
 from .store import InteractionStore
 
@@ -202,6 +202,42 @@ COMMAND_NAMES: tuple[str, ...] = (
     "tags",
     "collection",
     "tagsearch",
+    # ---- v1.4.0 新增指令与别名：拍卖 / 拔河 / 知识竞速 / 大富翁 / 战队 ----
+    "拍卖",
+    "拍卖场",
+    "卖场",
+    "出价",
+    "竞价",
+    "落槌",
+    "锤子",
+    "hammer",
+    "拔河",
+    "入队",
+    "收工",
+    "拔河结果",
+    "settle",
+    "拉锯",
+    "加入",
+    "竞速",
+    "知识竞速",
+    "答题",
+    "抢答赛",
+    "大富翁",
+    "掷骰前进",
+    "走格子",
+    "战队",
+    "小队",
+    "组队",
+    "战队贡献",
+    "auction",
+    "bid",
+    "tug",
+    "join",
+    "quiz",
+    "race",
+    "monopoly",
+    "stroll",
+    "squad",
     # ---- v1.2.0 新增指令与别名 ----
     "我的加成",
     "成就列表",
@@ -309,6 +345,31 @@ POLL_KEEP = 86400
 CLEAN_INTERVAL = 60
 # 冷却表硬上限，超过则按时间清理
 _COOLDOWN_MAX = 4096
+# 冷却默认值（秒/人/指令）。刻意取 0：真人手速下相邻两条指令常不足 1 秒，
+# 全局 1 秒冷却会让「签到完接着查积分」直接吃拒绝，体感就是「插件坏了」。
+# 想限流请在 WebUI 显式调大。
+_COOLDOWN_DEFAULT = 0
+# 不受冷却约束的指令（查询类，无副作用、无经济影响），避免看状态被限流
+_COOLDOWN_FREE_COMMANDS = frozenset(
+    {
+        "互动帮助",
+        "互动状态",
+        "积分",
+        "余额",
+        "我的",
+        "背包",
+        "排行榜",
+        "排行",
+        "榜单",
+        "互动统计",
+        "标签",
+        "成就标签",
+        "收集",
+        "标签搜索",
+        "搜标签",
+        "互动导出",
+    }
+)
 # 关键词自动回复的规则条数上限，防止配置被填成巨型列表后每消息全量扫描
 _MAX_KEYWORD_RULES = 200
 # 接龙需要「轮到别人」时的提示节流窗口（秒），避免刷屏
@@ -367,6 +428,15 @@ class InteractionPlugin(Star):
         self._duels: dict[str, dict[str, Any]] = {}
         # 第三批扩展玩法状态（按会话隔离）
         self._bosses: dict[str, games_world.BossFight] = {}
+        # 第四批扩展玩法状态（按会话隔离）
+        self._auctions: dict[str, games_arena.Auction] = {}
+        self._tugs: dict[str, games_arena.TugOfWar] = {}
+        self._quizzes: dict[str, games_arena.QuizRush] = {}
+        self._runs: dict[str, games_arena.DiceRun] = {}
+        # 上一题题目（避免连续重复出同一题）
+        self._quiz_last: dict[str, str] = {}
+        # 战队：会话 -> {队名: [成员ID]}
+        self._squads: dict[str, dict[str, list[str]]] = {}
         self._build_dispatch()
 
     # ------------------------------------------------------------------ 生命周期
@@ -509,11 +579,42 @@ class InteractionPlugin(Star):
                 return token
         return "".join(ch for ch in text if ch.isdigit())
 
-    def _guard(self, event: AstrMessageEvent) -> str | None:
-        """通用前置检查：总开关、群聊限制、冷却。
+    def _current_command(self, event: AstrMessageEvent) -> str:
+        """推断当前消息命中的触发词，用于冷却按指令隔离。
+
+        标准指令路径（``CommandFilter``）在唤醒时会剥掉 ``wake_prefix``，
+        但**不会**剥掉指令名，因此 ``message_str`` 里仍带着它；免唤醒路径
+        则由 ``_run_command`` 显式传入触发词。这里按最长匹配取触发词，
+        取不到时返回空串（等价于不参与冷却）。
 
         Args:
             event: 消息事件。
+
+        Returns:
+            命中的触发词；无法判定时返回空串。
+        """
+        text = self._normalize(event.message_str or "")
+        if not text:
+            return ""
+        for name in sorted(self._dispatch, key=len, reverse=True):
+            if text == name or (
+                text.startswith(name) and text[len(name)] in " \t\u3000"
+            ):
+                return name
+        return ""
+
+    def _guard(self, event: AstrMessageEvent, command: str = "") -> str | None:
+        """通用前置检查：总开关、群聊限制、冷却。
+
+        冷却按「会话 + 用户 + 指令」三维隔离，而不是整个插件共用一个时间戳。
+        原因是历史上这里只有一个 ``key = 会话:用户``：群里先发「签到」再发
+        「积分」，第二条必然落在同一个冷却窗口里被拒，用户看到的就是
+        「不管发什么都是操作太快啦」。按指令隔离后，同一条指令连点才受限，
+        不同指令互不影响。
+
+        Args:
+            event: 消息事件。
+            command: 触发词（用于冷却隔离）；留空表示不做冷却检查。
 
         Returns:
             拦截原因；通过时返回 ``None``。
@@ -525,11 +626,16 @@ class InteractionPlugin(Star):
         ):
             return "该玩法仅在群聊中可用哦。"
 
-        cooldown = self._int("permission", "cooldown_seconds", default=1)
+        if not command or command in _COOLDOWN_FREE_COMMANDS:
+            return None
+
+        cooldown = self._int(
+            "permission", "cooldown_seconds", default=_COOLDOWN_DEFAULT
+        )
         if cooldown <= 0:
             return None
 
-        key = f"{self._session_key(event)}:{event.get_sender_id()}"
+        key = f"{self._session_key(event)}:{event.get_sender_id()}:{command}"
         now = time.time()
         if now - self._cooldown.get(key, 0.0) < cooldown:
             return "操作太快啦，稍等一下～"
@@ -722,6 +828,18 @@ class InteractionPlugin(Star):
         reg(self.cmd_rebirth, "转生", "重生", "rebirth")
         reg(self.cmd_bonus, "我的加成", "加成", "bonus")
 
+        # 第四批扩展：群体竞技与协作
+        reg(self.cmd_auction, "拍卖", "拍卖场", "卖场", "auction")
+        reg(self.cmd_bid, "出价", "竞价", "bid")
+        reg(self.cmd_hammer, "落槌", "锤子", "hammer")
+        reg(self.cmd_tug, "拔河", "拉锯", "tug")
+        reg(self.cmd_join, "加入", "入队", "join")
+        reg(self.cmd_settle, "收工", "拔河结果", "settle")
+        reg(self.cmd_quiz, "竞速", "知识竞速", "抢答赛", "quiz", "race")
+        reg(self.cmd_answer, "答题", "answer")
+        reg(self.cmd_monopoly, "大富翁", "走格子", "掷骰前进", "monopoly", "stroll")
+        reg(self.cmd_squad, "战队", "小队", "组队", "squad")
+
         # 工具
         reg(self.cmd_random, "随机", "random", "帮我选")
         reg(self.cmd_joke, "笑话", "joke", "冷笑话")
@@ -754,28 +872,29 @@ class InteractionPlugin(Star):
         cleaned = (text or "").strip().lstrip("/!#！＃／").strip()
         return " ".join(cleaned.split())
 
-    def _resolve_command(self, text: str) -> tuple[Any, str] | None:
-        """把归一化文本解析为 ``(处理协程, 参数串)``。
+    def _resolve_command(self, text: str) -> tuple[Any, str, str] | None:
+        """把归一化文本解析为 ``(处理协程, 参数串, 命中触发词)``。
 
         采用「最长触发词优先」匹配，避免「投票结果」被「投票」抢先命中。
+        触发词一并返回，供冷却按指令维度隔离使用。
 
         Args:
             text: 已归一化的消息文本。
 
         Returns:
-            命中时返回 ``(handler, args)``；未命中返回 ``None``。
+            命中时返回 ``(handler, args, name)``；未命中返回 ``None``。
         """
         if not text:
             return None
-        best: tuple[Any, str] | None = None
+        best: tuple[Any, str, str] | None = None
         best_len = -1
         for name, handler in self._dispatch.items():
             if len(name) <= best_len:
                 continue
             if text == name:
-                best, best_len = (handler, ""), len(name)
+                best, best_len = (handler, "", name), len(name)
             elif text.startswith(name) and text[len(name)] in " \t\u3000":
-                best, best_len = (handler, text[len(name) :].strip()), len(name)
+                best, best_len = (handler, text[len(name) :].strip(), name), len(name)
         return best
 
     @filter.event_message_type(filter.EventMessageType.ALL)
@@ -805,10 +924,10 @@ class InteractionPlugin(Star):
         if self._bool("trigger", "wake_free", default=True):
             hit = self._resolve_command(text)
             if hit is not None:
-                handler, _rest = hit
+                handler, name, _rest = hit
                 # 统一让 handler 用 _args() 自行剥离指令名：那边有完整的
                 # COMMAND_NAMES 表，比这里按单个触发词剥离更可靠。
-                await self._run_command(handler, "", event)
+                await self._run_command(handler, "", event, name)
                 return
 
         # 关键词互动
@@ -826,7 +945,7 @@ class InteractionPlugin(Star):
             return
 
     async def _run_command(
-        self, handler: Any, args: str, event: AstrMessageEvent
+        self, handler: Any, args: str, event: AstrMessageEvent, command: str = ""
     ) -> None:
         """执行免唤醒命中的指令，并统一处理前置检查与结果输出。
 
@@ -834,13 +953,15 @@ class InteractionPlugin(Star):
             handler: 指令处理协程。
             args: 指令之后的参数文本。
             event: 消息事件。
+            command: 命中的触发词，用于冷却隔离。
         """
-        reason = self._guard(event)
+        reason = self._guard(event, command)
         if reason is not None:
-            # 冷却期内的刷屏静默丢弃；其余情况给出明确提示
-            if not reason.startswith("操作太快"):
-                event.stop_event()
-                await event.send(self._deny(reason))
+            # 一律给出明确提示。历史上冷却命中是「静默丢弃」的，
+            # 用户看不到任何回执，只会以为插件坏了 —— 正是「不管发什么
+            # 都是操作太快/没反应」的观感来源。
+            event.stop_event()
+            await event.send(self._deny(reason))
             return
         event.stop_event()
         try:
@@ -937,6 +1058,40 @@ class InteractionPlugin(Star):
                 await event.send(result)
                 return True
 
+        # 知识竞速：进行中的题目直接认答案（无需任何前缀）
+        quiz = self._quizzes.get(key)
+        if quiz is not None and not quiz.solved_by:
+            if quiz.expired():
+                # 到点没答出来：公布答案并收题，避免题目常驻内存
+                self._quizzes.pop(key, None)
+                event.stop_event()
+                await event.send(
+                    event.plain_result(f"⏰ 超时！答案是「{quiz.answers[0]}」。")
+                )
+                return True
+            # 只在「看起来是答案」时才接管，避免把正常聊天全部吃掉：
+            # 答案入库前先做一次归一化比对，命中才结算。
+            if games_arena.quiz_match(quiz.answers, text):
+                uid, name = self._sender(event)
+                result = await self._quiz_submit(event, quiz, key, uid, name, text)
+                event.stop_event()
+                await event.send(result)
+                return True
+
+        # 拍卖到点自动落槌（不必等发起人手动操作）
+        auction = self._auctions.get(key)
+        if auction is not None and not auction.settled and auction.expired():
+            event.stop_event()
+            await event.send(await self._settle_auction(key, auction))
+            return True
+
+        # 拔河到点自动结算
+        tug = self._tugs.get(key)
+        if tug is not None and not tug.settled and tug.expired():
+            event.stop_event()
+            await event.send(await self._settle_tug(key, tug))
+            return True
+
         # 谜语抢答
         result = await self._riddle_guess(event, text)
         if result is not None:
@@ -1013,6 +1168,21 @@ class InteractionPlugin(Star):
                     for k, g in self._bosses.items()
                     if now - g.started_at < _BOARD_TTL
                 }
+                self._auctions = {
+                    k: g
+                    for k, g in self._auctions.items()
+                    if not g.settled and now - g.started_at < _BOARD_TTL
+                }
+                self._tugs = {
+                    k: g
+                    for k, g in self._tugs.items()
+                    if not g.settled and now - g.started_at < _BOARD_TTL
+                }
+                self._quizzes = {
+                    k: g
+                    for k, g in self._quizzes.items()
+                    if not g.solved_by and now - g.started_at < _BOARD_TTL
+                }
                 self.store.prune_polls(POLL_KEEP, now)
                 if len(self._cooldown) > _COOLDOWN_MAX:
                     self._cooldown.clear()
@@ -1029,7 +1199,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """每日签到领取积分。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("sign_in"):
             return self._deny("签到功能已关闭。")
@@ -1069,7 +1239,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """查询个人积分、等级、称号与各项统计。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         uid, name = self._sender(event)
@@ -1102,7 +1272,7 @@ class InteractionPlugin(Star):
         Args:
             args: ``<目标用户> <数量>``，目标可用 ``@某人`` 或用户 ID。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         parts = (args.strip() or self._args(event).strip()).split()
         if len(parts) < 2:
@@ -1130,7 +1300,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """消耗积分抽奖。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("lottery"):
             return self._deny("抽奖功能已关闭。")
@@ -1160,7 +1330,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """开始一局猜数字。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("guess_number"):
             return self._deny("猜数字功能已关闭。")
@@ -1187,7 +1357,7 @@ class InteractionPlugin(Star):
         Args:
             args: 猜测的数字。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         raw = (args.strip() or self._args(event).strip()).split()
         if not raw or not raw[0].isdigit():
@@ -1242,7 +1412,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """开始一局词语接龙，可带起始词。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("word_chain"):
             return self._deny("接龙功能已关闭。")
@@ -1324,7 +1494,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """发起投票，用法：/投票 问题 | 选项1 | 选项2 ..."""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("vote"):
             return self._deny("投票功能已关闭。")
@@ -1374,7 +1544,7 @@ class InteractionPlugin(Star):
         Args:
             args: ``<投票编号> <选项序号>``。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         parts = (args.strip() or self._args(event).strip()).split()
         if len(parts) < 2:
@@ -1420,7 +1590,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选投票编号。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         polls = self.store.polls(key)
@@ -1473,7 +1643,7 @@ class InteractionPlugin(Star):
         Args:
             args: ``<数量> <面数>`` 或 ``NdM``，可省略。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("dice", default=False):
             return self._deny("掷骰子功能已关闭。")
@@ -1502,7 +1672,7 @@ class InteractionPlugin(Star):
         Args:
             args: ``<目标用户> <数量>``（数量会被自动收敛到安全上限）。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("rob", default=False):
             return self._deny("打劫功能已关闭。")
@@ -1617,7 +1787,7 @@ class InteractionPlugin(Star):
         Args:
             args: 排行维度，见 ``_RANK_ALIASES``。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         raw = args.strip() or self._args(event).strip()
         field = self._RANK_ALIASES.get(raw) if raw else "balance"
@@ -1649,7 +1819,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """查看每日任务进度。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         uid, name = self._sender(event)
@@ -1674,7 +1844,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """领取每日任务奖励；不带参数时一键领取所有可领任务。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         uid, name = self._sender(event)
@@ -1719,7 +1889,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选，要检验的数字。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("lucky"):
             return self._deny("幸运数字已关闭。")
@@ -1772,7 +1942,7 @@ class InteractionPlugin(Star):
         Args:
             args: 你的问题。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("eight_ball"):
             return self._deny("魔法八球已关闭。")
@@ -1789,7 +1959,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选，被扎心的对象（@某人 或 ID）。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("roast"):
             return self._deny("扎心文案已关闭。")
@@ -1844,6 +2014,12 @@ class InteractionPlugin(Star):
             "【世界线】\n"
             "讨伐 [Boss名] → 攻击 <积分> → 讨伐状态（全群协作，按伤害分配奖池）\n"
             "\n"
+            "【群体竞技】\n"
+            "拍卖 <道具名> [起拍价] [时长] → 出价 <金额> → 落槌\n"
+            "拔河 <队A> <队B> [时长] [奖金] → 加入 <队名> <力量> → 收工\n"
+            "竞速 → 直接发答案 ｜ 大富翁 [次数]\n"
+            "战队 / 战队 创建 <队名> / 战队 加入 <队名> / 战队 离开\n"
+            "\n"
             "【工具】\n"
             "投票 问题 | 选项1 | 选项2 → 投 <编号> <序号> → 投票结果 [编号]\n"
             "互动状态 ｜ 互动统计\n"
@@ -1880,7 +2056,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选下注积分。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("blackjack"):
             return self._deny("21 点已关闭。")
@@ -1942,7 +2118,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """21 点要牌。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         game = self._blackjack.get(key)
@@ -1962,7 +2138,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """21 点停牌结算。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         game = self._blackjack.get(key)
@@ -2023,7 +2199,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选自定义区间 ``最小 最大``。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("bomb"):
             return self._deny("数字炸弹已关闭。")
@@ -2094,7 +2270,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """出一道谜语让大家抢答。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("riddle"):
             return self._deny("猜谜已关闭。")
@@ -2116,7 +2292,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """公布当前谜语的谜底。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         riddle = self._riddles.pop(key, None)
@@ -2172,7 +2348,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选提问内容。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("turtle_soup"):
             return self._deny("海龟汤已关闭。")
@@ -2205,7 +2381,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """公布当前海龟汤的汤底。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         soup = self._soups.pop(key, None)
@@ -2224,7 +2400,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选目标词。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("rush"):
             return self._deny("抢答已关闭。")
@@ -2281,7 +2457,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """查看今日运势（同一天结果稳定）。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("fortune"):
             return self._deny("运势功能已关闭。")
@@ -2311,7 +2487,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """查看称号 / 头像框 / 消耗品商店。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("shop"):
             return self._deny("商店已关闭。")
@@ -2352,7 +2528,7 @@ class InteractionPlugin(Star):
         Args:
             args: 道具名称或 ID。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("shop"):
             return self._deny("商店已关闭。")
@@ -2421,7 +2597,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选 @某人。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         target = self._resolve_uid(args.strip() or self._args(event)) or str(
@@ -2454,7 +2630,7 @@ class InteractionPlugin(Star):
         Args:
             args: 称号名，留空表示卸下。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         uid, name = self._sender(event)
@@ -2482,7 +2658,7 @@ class InteractionPlugin(Star):
         Args:
             args: ``<@某人> <礼物名> [数量]``。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("social"):
             return self._deny("社交玩法已关闭。")
@@ -2537,7 +2713,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选 @某人。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("social"):
             return self._deny("社交玩法已关闭。")
@@ -2579,7 +2755,7 @@ class InteractionPlugin(Star):
         Args:
             args: ``@某人``。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("social"):
             return self._deny("社交玩法已关闭。")
@@ -2616,7 +2792,7 @@ class InteractionPlugin(Star):
         Args:
             args: ``<@某人> [赌注]``。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("social"):
             return self._deny("社交玩法已关闭。")
@@ -2697,7 +2873,7 @@ class InteractionPlugin(Star):
         Args:
             args: ``问题 | 选项1 | 选项2 ...``。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("wager"):
             return self._deny("竞猜已关闭。")
@@ -2718,10 +2894,6 @@ class InteractionPlugin(Star):
         self._wagers[key] = game
         lines = [
             f"🎲 竞猜开盘：{question}",
-            f"编号「{game.duration // 60} 分钟」后自动开奖",
-        ]
-        lines = [
-            f"🎲 竞猜开盘：{question}",
             f"时长 {game.duration // 60} 分钟，到期自动开奖",
         ]
         for i, opt in enumerate(game.options, 1):
@@ -2740,7 +2912,7 @@ class InteractionPlugin(Star):
         Args:
             args: ``<选项序号> <金额>``。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("wager"):
             return self._deny("竞猜已关闭。")
@@ -2800,7 +2972,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选正确选项序号。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         game = self._wagers.get(key)
@@ -2867,7 +3039,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选首步格号（1~9）。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("tictactoe"):
             return self._deny("井字棋已关闭。")
@@ -2957,7 +3129,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选 ``边长 雷数``。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("mine"):
             return self._deny("扫雷已关闭。")
@@ -3044,7 +3216,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选猜测数字串。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("codebreaker"):
             return self._deny("数字破解已关闭。")
@@ -3122,7 +3294,7 @@ class InteractionPlugin(Star):
         Args:
             args: ``正`` / ``反``，可跟赌注。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("coin"):
             return self._deny("抛硬币已关闭。")
@@ -3174,7 +3346,7 @@ class InteractionPlugin(Star):
         Args:
             args: ``石头|剪刀|布|蜥蜴|斯波克``，可跟赌注。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("rpsls"):
             return self._deny("决斗盘已关闭。")
@@ -3235,7 +3407,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选连抽次数。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("wheel"):
             return self._deny("大转盘已关闭。")
@@ -3296,7 +3468,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选 @某人。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         target = self._resolve_uid(args.strip() or self._args(event)) or str(
@@ -3357,7 +3529,7 @@ class InteractionPlugin(Star):
             标签 搜索 签到           —— 关键词搜索
             标签 稀有 搜索 抽奖      —— 组合筛选（顺序不限）
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         raw = (args.strip() or self._args(event).strip()).strip()
@@ -3483,7 +3655,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """转生：重置积分换取永久收益加成。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("rebirth_play", default=True):
             return self._deny("转生功能已关闭。")
@@ -3512,7 +3684,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """查看转生加成与今日折扣。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         uid, name = self._sender(event)
@@ -3548,7 +3720,7 @@ class InteractionPlugin(Star):
         Args:
             args: 可选 Boss 名（史莱姆王 / 烈焰巨龙 / 深海巨妖 / 虚空利维坦）。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("boss", default=True):
             return self._deny("群 Boss 战已关闭。")
@@ -3589,7 +3761,7 @@ class InteractionPlugin(Star):
         Args:
             args: 投入积分。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         fight = self._bosses.get(key)
@@ -3671,7 +3843,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """查看当前群 Boss 战进度与伤害榜。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         fight = self._bosses.get(key)
@@ -3714,7 +3886,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """查看本季赛季进度与预计奖励。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         uid, name = self._sender(event)
@@ -3781,7 +3953,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """领养 / 查看宠物。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("pet", default=True):
             return self._deny("宠物玩法已关闭。")
@@ -3813,7 +3985,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """照料宠物一次（有冷却）。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         if not self._feature_on("pet", default=True):
             return self._deny("宠物玩法已关闭。")
@@ -3862,7 +4034,7 @@ class InteractionPlugin(Star):
         Args:
             args: 新名字（1~12 字）。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
         uid, name = self._sender(event)
@@ -3892,7 +4064,7 @@ class InteractionPlugin(Star):
         Args:
             args: ``选项1|选项2|...`` 或空格分隔。
         """
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         raw = args.strip() or self._args(event).strip()
         if not raw:
@@ -3911,7 +4083,7 @@ class InteractionPlugin(Star):
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
         """来一条冷笑话。"""
-        if reason := self._guard(event):
+        if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         return event.plain_result("😂 " + games_extra.random_joke(self._rng))
 
@@ -3962,3 +4134,585 @@ class InteractionPlugin(Star):
     # 说明：关键词互动已并入 on_message 统一入口（见「免唤醒总入口」一节），
     # 不再单独注册事件钩子，避免同一条消息被两个钩子重复处理、以及绕开
     # 免唤醒指令优先级的问题。
+
+    # ------------------------------------------------- 第四批扩展：拍卖 / 拔河
+
+    def _item_by_query(self, query: str) -> tuple[str, str, int, str, str] | None:
+        """按用户输入解析商店道具。
+
+        Args:
+            query: 道具名或 ID。
+
+        Returns:
+            ``(道具ID, 名称, 价格, 类型, 说明)``；未命中返回 ``None``。
+        """
+        return games_extra.resolve_shop_item(query)
+
+    @staticmethod
+    def _has_item(user: dict, item_id: str, kind: str = "") -> bool:
+        """判断用户是否持有某件道具。
+
+        道具按类型存在不同字段：``title`` -> ``titles``、
+        ``frame`` -> ``frames``、其余 -> ``bag``。
+
+        Args:
+            user: 用户档案。
+            item_id: 道具 ID。
+            kind: 道具类型；未知时三类都查。
+
+        Returns:
+            是否持有。
+        """
+        name = games_extra.item_display_name(item_id)
+        short = name.split("·", 1)[-1]
+        if kind in ("", "title") and short in (user.get("titles") or []):
+            return True
+        if kind in ("", "frame") and short in (user.get("frames") or []):
+            return True
+        return bool(
+            kind in ("", "consumable")
+            and int((user.get("bag") or {}).get(item_id, 0) or 0) > 0
+        )
+
+    @staticmethod
+    def _take_item(user: dict, item_id: str, kind: str = "") -> bool:
+        """从用户处移出一件道具（拍卖托管用）。
+
+        Args:
+            user: 用户档案（就地更新）。
+            item_id: 道具 ID。
+            kind: 道具类型。
+
+        Returns:
+            是否成功移出。
+        """
+        name = games_extra.item_display_name(item_id)
+        short = name.split("·", 1)[-1]
+        if kind in ("", "title"):
+            titles = list(user.get("titles") or [])
+            if short in titles:
+                titles.remove(short)
+                user["titles"] = titles
+                if user.get("title") == short:
+                    user["title"] = titles[0] if titles else ""
+                return True
+        if kind in ("", "frame"):
+            frames = list(user.get("frames") or [])
+            if short in frames:
+                frames.remove(short)
+                user["frames"] = frames
+                return True
+        if kind in ("", "consumable"):
+            bag = user.setdefault("bag", {})
+            have = int(bag.get(item_id, 0) or 0)
+            if have > 0:
+                if have == 1:
+                    bag.pop(item_id, None)
+                else:
+                    bag[item_id] = have - 1
+                return True
+        return False
+
+    @staticmethod
+    def _give_item(user: dict, item_id: str, kind: str = "") -> None:
+        """给用户发放一件道具。
+
+        Args:
+            user: 用户档案（就地更新）。
+            item_id: 道具 ID。
+            kind: 道具类型。
+        """
+        name = games_extra.item_display_name(item_id)
+        short = name.split("·", 1)[-1]
+        if kind == "title":
+            titles = user.setdefault("titles", [])
+            if short not in titles:
+                titles.append(short)
+            return
+        if kind == "frame":
+            frames = user.setdefault("frames", [])
+            if short not in frames:
+                frames.append(short)
+            return
+        bag = user.setdefault("bag", {})
+        bag[item_id] = int(bag.get(item_id, 0) or 0) + 1
+
+    @filter.command("拍卖", alias={"拍卖场", "卖场", "auction"})
+    async def cmd_auction(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """发起一场拍卖，用法：拍卖 <道具名> [起拍价] [时长秒]。
+
+        拍卖的道具由发起人自掏腰包（从背包扣除），成交款归发起人。
+        这是一条**零和转移**路径：系统不产出积分。
+        """
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if not self._feature_on("auction"):
+            return self._deny("拍卖行已关闭。")
+        raw = (args.strip() or self._args(event).strip()).split()
+        if not raw:
+            return event.plain_result(
+                "用法：拍卖 <道具名> [起拍价] [时长秒]\n"
+                "例如：拍卖 限定称号：欧皇 20 120"
+            )
+        found = self._item_by_query(raw[0])
+        if found is None:
+            return event.plain_result(
+                f"没有找到「{raw[0]}」这件道具。发「商店」看看有什么。"
+            )
+        item_id, item_name, item_price, kind, _desc = found
+
+        key = self._session_key(event)
+        uid, name = self._sender(event)
+        ongoing = self._auctions.get(key)
+        if ongoing is not None and not ongoing.settled:
+            return event.plain_result(
+                f"本群已有一场「{ongoing.item.name}」在拍卖，先等它落槌。"
+            )
+
+        user = self.store.get_user(key, uid)
+        if not self._has_item(user, item_id, kind):
+            return event.plain_result(
+                f"你还没有「{item_name}」，先去商店买一个再来拍卖吧。"
+            )
+
+        start_price = games.parse_amount(raw[1] if len(raw) > 1 else "", 0)
+        duration = games.parse_amount(
+            raw[2] if len(raw) > 2 else "",
+            self._int("auction", "duration", default=300),
+        )
+        auction_item = games_arena.AuctionItem(item_id, item_name, item_price, kind)
+        auction = games_arena.Auction.new(
+            auction_item,
+            start_price=start_price,
+            owner=uid,
+            duration=duration,
+            min_increment=max(1, self._int("auction", "min_increment", default=1)),
+        )
+
+        # 先把道具从发起人背包/收藏移出（由插件保管），成交后转交得标者
+        self._take_item(user, item_id, kind)
+        await self.store.save(key)
+        self._auctions[key] = auction
+
+        return event.plain_result(
+            f"🔨 @{name} 发起拍卖：「{item_name}」（参考价 {item_price} {self._unit}）\n"
+            f"起拍价 {auction.start_price}，最小加价 {auction.min_increment}，"
+            f"时长 {auction.duration // 60} 分钟。\n"
+            f"发送「出价 <金额>」参与；发起人发「落槌」提前结束。"
+        )
+
+    @filter.command("出价", alias={"竞价", "bid"})
+    async def cmd_bid(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """为进行中的拍卖出价，用法：出价 <金额>。"""
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        raw = args.strip() or self._args(event).strip()
+        amount = games.parse_amount(raw, 0)
+        if amount <= 0:
+            return event.plain_result("用法：出价 <金额>，例如：出价 50")
+
+        key = self._session_key(event)
+        auction = self._auctions.get(key)
+        if auction is None or auction.settled:
+            return event.plain_result("本群没有进行中的拍卖，先发「拍卖 <道具名>」。")
+        if auction.expired():
+            return event.plain_result("这场拍卖已经到点了，等发起人落槌吧。")
+
+        uid, name = self._sender(event)
+        user = self.store.get_user(key, uid)
+        if int(user.get("balance", 0)) < amount:
+            return event.plain_result(
+                f"出价不能超过自己的余额（当前 {user['balance']} 互动币）。"
+            )
+
+        ok, msg = auction.place_bid(uid, amount)
+        unit = self._unit
+        if not ok:
+            return event.plain_result(msg)
+        top = auction.top_bid
+        nxt = auction.min_next_bid()
+        return event.plain_result(
+            f"@{name} {msg}\n当前最高 {top} {unit}（{auction.top_bidder} 领先），"
+            f"下次最低出 {nxt}。"
+        )
+
+    @filter.command("落槌", alias={"锤子", "hammer"})
+    async def cmd_hammer(self, event: AstrMessageEvent) -> MessageEventResult | None:
+        """结算当前拍卖（发起人或管理员可提前落槌）。"""
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        key = self._session_key(event)
+        auction = self._auctions.get(key)
+        if auction is None or auction.settled:
+            return event.plain_result("本群没有进行中的拍卖。")
+
+        uid, _name = self._sender(event)
+        if auction.owner and uid != auction.owner and not event.is_admin():
+            return event.plain_result("只有发起人或管理员可以落槌。")
+
+        return await self._settle_auction(key, auction)
+
+    async def _settle_auction(
+        self, key: str, auction: games_arena.Auction
+    ) -> MessageEventResult:
+        """结算一场拍卖，完成积分与道具交割。
+
+        抽成独立方法是因为它有两个触发源：手动「落槌」与到点自动结算。
+        两处共用同一段交割逻辑，避免自动结算漏掉道具转移。
+
+        Args:
+            key: 会话标识。
+            auction: 拍卖实例。
+
+        Returns:
+            结算结果消息。
+        """
+        result = auction.settle()
+        unit = self._unit
+        if result["ok"] and result["sold"]:
+            winner = str(result["winner"])
+            price = int(result["price"])
+            user = self.store.get_user(key, winner)
+            if int(user.get("balance", 0)) < price:
+                # 得标者余额在出价后不足（例如中途把积分转走了）：
+                # 不能让他透支，改为流拍并把道具退还发起人。
+                self._give_item(
+                    self.store.get_user(key, auction.owner),
+                    auction.item.item_id,
+                    auction.item.kind,
+                )
+                await self.store.save(key)
+                self._auctions.pop(key, None)
+                return MessageEventResult().message(
+                    f"⚠️ {winner} 余额不足以支付 {price} {unit}，本次流拍，"
+                    f"「{auction.item.name}」已退还发起人。"
+                )
+            self.store.add_balance(key, winner, -price)
+            self.store.add_balance(key, auction.owner, price)
+            self._give_item(user, auction.item.item_id, auction.item.kind)
+        elif result["ok"]:
+            self._give_item(
+                self.store.get_user(key, auction.owner),
+                auction.item.item_id,
+                auction.item.kind,
+            )
+
+        await self.store.save(key)
+        self._auctions.pop(key, None)
+        return MessageEventResult().message(str(result["note"]))
+
+    async def _settle_tug(
+        self, key: str, tug: games_arena.TugOfWar
+    ) -> MessageEventResult:
+        """结算一场拔河并按胜方名单发放奖金。
+
+        奖金来自配置里的固定额度（不是从输方扣），属于**有限发放**：
+        不会因为投入的力量变多而多发，避免变成刷分路径。
+
+        Args:
+            key: 会话标识。
+            tug: 拔河实例。
+
+        Returns:
+            结算结果消息。
+        """
+        result = tug.settle()
+        note = str(result["note"])
+        if result["ok"] and not result["tie"]:
+            for member in result["winners"]:
+                self.store.add_balance(key, member, tug.prizes)
+        await self.store.save(key)
+        self._tugs.pop(key, None)
+        return MessageEventResult().message(note)
+
+    @filter.command("收工", alias={"拔河结果", "settle"})
+    async def cmd_settle(self, event: AstrMessageEvent) -> MessageEventResult | None:
+        """结算当前进行中的拔河（发起人或管理员可用）。"""
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        key = self._session_key(event)
+        tug = self._tugs.get(key)
+        if tug is None or tug.settled:
+            return event.plain_result("本群没有进行中的拔河。")
+        return await self._settle_tug(key, tug)
+
+    @filter.command("拔河", alias={"拉锯", "tug"})
+    async def cmd_tug(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """开一场团队拔河，用法：拔河 <队A> <队B> [时长秒]。
+
+        力量只用于比大小，不从账户扣分；胜方每人领固定奖金。
+        奖池来自配置，属于**有限发放**，不随投入增长。
+        """
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if not self._feature_on("tug"):
+            return self._deny("拔河已关闭。")
+        raw = (args.strip() or self._args(event).strip()).split()
+        if len(raw) < 2:
+            return event.plain_result(
+                "用法：拔河 <队A> <队B> [时长秒]\n例如：拔河 红队 蓝队 120"
+            )
+        duration = games.parse_amount(
+            raw[2] if len(raw) > 2 else "", self._int("tug", "duration", default=300)
+        )
+        prize = games.parse_amount(
+            raw[3] if len(raw) > 3 else "", self._int("tug", "prize", default=50)
+        )
+        key = self._session_key(event)
+        ongoing = self._tugs.get(key)
+        if ongoing is not None and not ongoing.settled:
+            return event.plain_result("本群已有一场拔河在进行，先等它结束。")
+
+        game = games_arena.TugOfWar.new(raw[:2], duration=duration, prizes=prize)
+        if len(game.teams) < 2:
+            return event.plain_result("需要两个不同的队名。")
+        self._tugs[key] = game
+        names = " / ".join(game.teams)
+        return event.plain_result(
+            f"🪢 拔河开始！{names}\n"
+            f"发送「加入 <队名> <力量>」投入，时长 {game.duration // 60} 分钟。\n"
+            f"胜方每人得 {game.prizes} {self._unit}（力量只比大小，不扣分）。"
+        )
+
+    @filter.command("加入", alias={"入队", "join"})
+    async def cmd_join(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """加入拔河某队并投入力量，用法：加入 <队名> <力量>。"""
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        raw = (args.strip() or self._args(event).strip()).split()
+        if len(raw) < 2:
+            return event.plain_result("用法：加入 <队名> <力量>，例如：加入 红队 50")
+        key = self._session_key(event)
+        game = self._tugs.get(key)
+        if game is None or game.settled:
+            return event.plain_result(
+                "本群没有进行中的拔河，先发「拔河 <队A> <队B>」。"
+            )
+        uid, name = self._sender(event)
+        power = games.parse_amount(raw[1], 0)
+        ok, msg = game.join(raw[0], uid, power)
+        if not ok:
+            return event.plain_result(msg)
+        return event.plain_result(f"@{name} {msg}")
+
+    # --------------------------------------------- 第四批扩展：知识竞速 / 大富翁
+
+    @filter.command("竞速", alias={"知识竞速", "抢答赛", "quiz", "race"})
+    async def cmd_quiz(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """出一道知识题，第一个答对的人拿奖励。
+
+        用法：竞速 [题号或关键词]。直接在群里发答案即可参与。
+        """
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if not self._feature_on("quiz"):
+            return self._deny("知识竞速已关闭。")
+        key = self._session_key(event)
+        uid, _name = self._sender(event)
+        ongoing = self._quizzes.get(key)
+        if ongoing is not None and not ongoing.solved_by and not ongoing.expired():
+            return event.plain_result(
+                f"还有一题没答完：「{ongoing.question}」（直接发答案参与）"
+            )
+
+        exclude: tuple[str, ...] = ()
+        if self._quiz_last.get(key):
+            exclude = (self._quiz_last[key],)
+        game = games_arena.QuizRush.new(
+            self._rng,
+            timeout=self._int("quiz", "timeout", default=60),
+            owner=uid,
+            exclude=exclude,
+        )
+        self._quizzes[key] = game
+        self._quiz_last[key] = game.question
+        reward = self._int("quiz", "reward", default=25)
+        return event.plain_result(
+            f"🧠 知识竞速！\n{game.question}\n"
+            f"限时 {game.timeout} 秒，答对得 {reward} {self._unit}；"
+            f"直接在群里发答案即可（答错 3 秒后才能再答）。"
+        )
+
+    @filter.command("答题", alias={"answer"})
+    async def cmd_answer(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """提交知识竞速的答案，用法：答题 <答案>。"""
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        key = self._session_key(event)
+        game = self._quizzes.get(key)
+        if game is None:
+            return event.plain_result("本群没有进行中的知识竞速，先发「竞速」出一题。")
+        raw = args.strip() or self._args(event).strip()
+        if not raw:
+            return event.plain_result("用法：答题 <答案>")
+        uid, name = self._sender(event)
+        return await self._quiz_submit(event, game, key, uid, name, raw)
+
+    async def _quiz_submit(
+        self,
+        event: AstrMessageEvent,
+        game: games_arena.QuizRush,
+        key: str,
+        uid: str,
+        name: str,
+        answer: str,
+    ) -> MessageEventResult:
+        """统一处理一次答题结算（指令入口与免前缀入口共用）。
+
+        Args:
+            event: 消息事件。
+            game: 当前题目。
+            key: 会话标识。
+            uid: 答题人。
+            name: 答题人昵称。
+            answer: 用户答案。
+
+        Returns:
+            消息结果。
+        """
+        outcome, msg = game.submit(uid, answer)
+        if outcome == "correct":
+            reward = self._int("quiz", "reward", default=25)
+            user = self.store.get_user(key, uid)
+            self.store.add_balance(key, uid, reward)
+            user["quiz_win"] = games._safe_int(user.get("quiz_win"), 0) + 1
+            games.bump_daily(user, "quiz")
+            await self.store.save(key)
+            self._quizzes.pop(key, None)
+            return event.plain_result(f"@{name} {msg} 奖励 {reward} {self._unit}！")
+        if outcome == "closed":
+            self._quizzes.pop(key, None)
+        return event.plain_result(f"@{name} {msg}" if outcome != "locked" else msg)
+
+    @filter.command("大富翁", alias={"走格子", "掷骰前进", "monopoly", "stroll"})
+    async def cmd_monopoly(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """掷骰走格子，落在哪格结算哪格。用法：大富翁 [次数]。"""
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if not self._feature_on("monopoly"):
+            return self._deny("大富翁已关闭。")
+        key = self._session_key(event)
+        uid, name = self._sender(event)
+        times = games.parse_amount(args.strip() or self._args(event), 1)
+        run = self._runs.get(key)
+        if run is None:
+            run = games_arena.DiceRun()
+            self._runs[key] = run
+        produced = run.roll(self._rng, times=times)
+        delta = run.total_delta(produced)
+        user = self.store.get_user(key, uid)
+        if delta:
+            self.store.add_balance(key, uid, delta)
+        user["monopoly_steps"] = games._safe_int(user.get("monopoly_steps"), 0) + len(
+            produced
+        )
+        games.bump_daily(user, "monopoly")
+        await self.store.save(key)
+        body = run.render(produced)
+        unit = self._unit
+        return event.plain_result(
+            f"@{name} {body}\n余额 {user['balance']} {unit}（本玩法长期通缩，纯娱乐）"
+        )
+
+    # --------------------------------------------- 第四批扩展：战队
+
+    @filter.command("战队", alias={"小队", "组队", "squad"})
+    async def cmd_squad(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """查看/创建战队，用法：战队 / 战队 创建 <队名> / 战队 加入 <队名>。
+
+        战队是纯展示与荣誉体系：把成员既有统计汇总成战队贡献，
+        不发放额外积分，避免又多一条刷分路径。
+        """
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        key = self._session_key(event)
+        uid, name = self._sender(event)
+        squads = self._squads.setdefault(key, {})
+        raw = (args.strip() or self._args(event).strip()).split()
+
+        if not raw:
+            if not squads:
+                return event.plain_result(
+                    "本群还没有战队。\n用法：战队 创建 <队名> ／ 战队 加入 <队名>"
+                )
+            lines = ["🛡 本群战队"]
+            for sname, members in sorted(squads.items()):
+                total = sum(
+                    games_arena.squad_contribution(self.store.get_user(key, m))
+                    for m in members
+                )
+                tier, inner, need = games_arena.squad_progress(total)
+                extra = f"（{inner}/{need}）" if need else "（已满级）"
+                lines.append(
+                    f"  {sname} · {tier}{extra}｜{len(members)} 人｜总贡献 {total}"
+                )
+            lines.append("用「战队 创建 <队名>」或「战队 加入 <队名>」参与。")
+            return event.plain_result("\n".join(lines))
+
+        action = raw[0]
+        if action in {"创建", "create"}:
+            if len(raw) < 2:
+                return event.plain_result("用法：战队 创建 <队名>")
+            sname = " ".join(raw[1:])[:12]
+            if sname in squads:
+                return event.plain_result(f"「{sname}」已经存在了。")
+            if len(squads) >= 20:
+                return event.plain_result("本群战队数量已达上限。")
+            squads[sname] = [uid]
+            user = self.store.get_user(key, uid)
+            user["squad"] = sname
+            await self.store.save(key)
+            return event.plain_result(f"🛡 @{name} 创建了战队「{sname}」！")
+
+        if action in {"加入", "join"}:
+            if len(raw) < 2:
+                return event.plain_result("用法：战队 加入 <队名>")
+            sname = " ".join(raw[1:])[:12]
+            if sname not in squads:
+                return event.plain_result(f"没有「{sname}」这个战队。")
+            members = squads[sname]
+            if uid in members:
+                return event.plain_result("你已经在这个战队里了。")
+            if len(members) >= games_arena.SQUAD_MAX_MEMBERS:
+                return event.plain_result(
+                    f"「{sname}」已满 {games_arena.SQUAD_MAX_MEMBERS} 人。"
+                )
+            members.append(uid)
+            user = self.store.get_user(key, uid)
+            user["squad"] = sname
+            await self.store.save(key)
+            return event.plain_result(
+                f"🛡 @{name} 加入了「{sname}」（{len(members)} 人）。"
+            )
+
+        if action in {"离开", "退出", "leave"}:
+            user = self.store.get_user(key, uid)
+            sname = str(user.get("squad") or "")
+            if sname not in squads or uid not in squads[sname]:
+                return event.plain_result("你还没有加入任何战队。")
+            squads[sname].remove(uid)
+            if not squads[sname]:
+                squads.pop(sname, None)
+            user["squad"] = ""
+            await self.store.save(key)
+            return event.plain_result(f"@{name} 已离开「{sname}」。")
+
+        return event.plain_result(
+            "用法：战队 创建 <队名> ／ 战队 加入 <队名> ／ 战队 离开"
+        )
