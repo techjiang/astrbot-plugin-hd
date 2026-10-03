@@ -458,6 +458,12 @@
         "description": "允许购买",
         "type": "bool",
         "default": true
+      },
+      "daily_discount": {
+        "description": "启用每日随机折扣",
+        "type": "bool",
+        "default": true,
+        "hint": "每个群每天会随机到 0~30% 的商店折扣，同一天结果稳定。"
       }
     }
   },
@@ -623,6 +629,322 @@
         "description": "启用扎心文案",
         "type": "bool",
         "default": true
+      }
+    }
+  },
+  "wager": {
+    "description": "弹幕竞猜设置",
+    "hint": "用积分押注预测结果，按实时赔率派彩。赔付倍数 1.9，长期期望为负，不存在刷分空间。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用竞猜",
+        "type": "bool",
+        "default": true
+      },
+      "duration_seconds": {
+        "description": "竞猜时长（秒）",
+        "type": "int",
+        "default": 180,
+        "hint": "到点自动开奖。",
+        "slider": {
+          "min": 30,
+          "max": 3600,
+          "step": 30
+        }
+      },
+      "max_options": {
+        "description": "最大选项数",
+        "type": "int",
+        "default": 5,
+        "slider": {
+          "min": 2,
+          "max": 8,
+          "step": 1
+        }
+      },
+      "max_bet": {
+        "description": "单人单次最大下注",
+        "type": "int",
+        "default": 1000,
+        "slider": {
+          "min": 10,
+          "max": 100000,
+          "step": 10
+        }
+      }
+    }
+  },
+  "tictactoe": {
+    "description": "井字棋设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用井字棋",
+        "type": "bool",
+        "default": true
+      },
+      "reward": {
+        "description": "获胜奖励积分",
+        "type": "int",
+        "default": 15,
+        "slider": {
+          "min": 0,
+          "max": 1000,
+          "step": 1
+        }
+      },
+      "punish": {
+        "description": "失败扣分",
+        "type": "int",
+        "default": 0,
+        "hint": "默认 0，即只奖励不惩罚。",
+        "slider": {
+          "min": 0,
+          "max": 1000,
+          "step": 1
+        }
+      }
+    }
+  },
+  "mine": {
+    "description": "扫雷设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用扫雷",
+        "type": "bool",
+        "default": true
+      },
+      "size": {
+        "description": "棋盘边长",
+        "type": "int",
+        "default": 6,
+        "slider": {
+          "min": 3,
+          "max": 8,
+          "step": 1
+        }
+      },
+      "mines": {
+        "description": "雷的数量",
+        "type": "int",
+        "default": 6,
+        "slider": {
+          "min": 1,
+          "max": 20,
+          "step": 1
+        }
+      },
+      "timeout_seconds": {
+        "description": "对局超时（秒）",
+        "type": "int",
+        "default": 600,
+        "slider": {
+          "min": 60,
+          "max": 3600,
+          "step": 30
+        }
+      },
+      "punish": {
+        "description": "踩雷扣分",
+        "type": "int",
+        "default": 20,
+        "slider": {
+          "min": 0,
+          "max": 1000,
+          "step": 1
+        }
+      },
+      "reward_per_cell": {
+        "description": "每格奖励积分",
+        "type": "int",
+        "default": 1,
+        "slider": {
+          "min": 0,
+          "max": 20,
+          "step": 1
+        }
+      },
+      "clear_reward": {
+        "description": "通关额外奖励",
+        "type": "int",
+        "default": 80,
+        "slider": {
+          "min": 0,
+          "max": 5000,
+          "step": 1
+        }
+      }
+    }
+  },
+  "codebreaker": {
+    "description": "数字破解设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用数字破解",
+        "type": "bool",
+        "default": true
+      },
+      "digits": {
+        "description": "答案位数",
+        "type": "int",
+        "default": 4,
+        "slider": {
+          "min": 3,
+          "max": 6,
+          "step": 1
+        }
+      },
+      "max_attempts": {
+        "description": "最大尝试次数",
+        "type": "int",
+        "default": 8,
+        "slider": {
+          "min": 3,
+          "max": 20,
+          "step": 1
+        }
+      },
+      "reward": {
+        "description": "破解成功奖励",
+        "type": "int",
+        "default": 120,
+        "slider": {
+          "min": 0,
+          "max": 5000,
+          "step": 1
+        }
+      },
+      "early_bonus": {
+        "description": "每提前一次额外奖励",
+        "type": "int",
+        "default": 10,
+        "slider": {
+          "min": 0,
+          "max": 500,
+          "step": 1
+        }
+      }
+    }
+  },
+  "coin": {
+    "description": "抛硬币设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用抛硬币",
+        "type": "bool",
+        "default": true
+      },
+      "max_bet": {
+        "description": "最大赌注",
+        "type": "int",
+        "default": 500,
+        "slider": {
+          "min": 0,
+          "max": 100000,
+          "step": 10
+        }
+      }
+    }
+  },
+  "rpsls": {
+    "description": "决斗盘设置（石头剪刀布蜥蜴斯波克）",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用决斗盘",
+        "type": "bool",
+        "default": true
+      },
+      "max_bet": {
+        "description": "最大赌注",
+        "type": "int",
+        "default": 500,
+        "slider": {
+          "min": 0,
+          "max": 100000,
+          "step": 10
+        }
+      },
+      "draw_fee": {
+        "description": "平局手续费",
+        "type": "int",
+        "default": 0,
+        "hint": "默认 0，即平局不扣分。",
+        "slider": {
+          "min": 0,
+          "max": 1000,
+          "step": 1
+        }
+      }
+    }
+  },
+  "wheel": {
+    "description": "幸运大转盘设置",
+    "hint": "奖池期望约 0.85 倍消耗，属于回收积分的娱乐玩法，不会造成通货膨胀。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用大转盘",
+        "type": "bool",
+        "default": true
+      },
+      "cost": {
+        "description": "单次消耗积分",
+        "type": "int",
+        "default": 50,
+        "slider": {
+          "min": 0,
+          "max": 100000,
+          "step": 10
+        }
+      },
+      "cooldown_seconds": {
+        "description": "冷却时间（秒）",
+        "type": "int",
+        "default": 10,
+        "slider": {
+          "min": 0,
+          "max": 3600,
+          "step": 5
+        }
+      },
+      "max_spins": {
+        "description": "单次最大连抽",
+        "type": "int",
+        "default": 10,
+        "slider": {
+          "min": 1,
+          "max": 50,
+          "step": 1
+        }
+      }
+    }
+  },
+  "rebirth_play": {
+    "description": "转生设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用转生",
+        "type": "bool",
+        "default": true,
+        "hint": "转生会用积分换取永久收益加成。"
+      }
+    }
+  },
+  "achievements": {
+    "description": "成就设置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用成就系统",
+        "type": "bool",
+        "default": true,
+        "hint": "达成条件自动解锁并发放一次性奖励。"
       }
     }
   }

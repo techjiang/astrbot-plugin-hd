@@ -99,6 +99,39 @@ CONFIG = {
         "gift_intimacy": 5,
         "duel_stake": 20,
     },
+    "wager": {
+        "enabled": True,
+        "duration_seconds": 180,
+        "max_options": 5,
+        "max_bet": 1000,
+    },
+    "tictactoe": {"enabled": True, "reward": 15, "punish": 0},
+    "mine": {
+        "enabled": True,
+        "size": 6,
+        "mines": 6,
+        "timeout_seconds": 600,
+        "punish": 20,
+        "reward_per_cell": 1,
+        "clear_reward": 80,
+    },
+    "codebreaker": {
+        "enabled": True,
+        "digits": 4,
+        "max_attempts": 8,
+        "reward": 120,
+        "early_bonus": 10,
+    },
+    "coin": {"enabled": True, "max_bet": 500},
+    "rpsls": {"enabled": True, "max_bet": 500, "draw_fee": 0},
+    "wheel": {
+        "enabled": True,
+        "cost": 50,
+        "cooldown_seconds": 0,
+        "max_spins": 10,
+    },
+    "rebirth_play": {"enabled": True},
+    "achievements": {"enabled": True},
 }
 
 
@@ -320,6 +353,19 @@ async def main() -> int:
         "cmd_joke",
         "cmd_help",
         "cmd_status",
+        # ---- v1.2.0 ----
+        "cmd_wager",
+        "cmd_bet",
+        "cmd_draw",
+        "cmd_tictactoe",
+        "cmd_mine",
+        "cmd_codebreaker",
+        "cmd_coin",
+        "cmd_rpsls",
+        "cmd_wheel",
+        "cmd_achievements",
+        "cmd_rebirth",
+        "cmd_bonus",
     }
     missing = expected - set(cmds)
     assert not missing, f"指令未注册: {missing}"
@@ -334,6 +380,10 @@ async def main() -> int:
         ("互动状态", ""),  # 最长名优先，不能被「互动」抢先
         ("投票 午饭 | 面 | 饭", "午饭 | 面 | 饭"),
         ("转账 1002 50", "1002 50"),
+        ("竞猜 晚饭 | 火锅 | 烧烤", "晚饭 | 火锅 | 烧烤"),
+        ("下注 1 50", "1 50"),
+        ("我的加成", ""),
+        ("扫雷 6 6", "6 6"),
     ]
     for text, expect in cases:
         got = plugin._args(make_event(text))
@@ -482,6 +532,39 @@ async def main() -> int:
     await send("谁最先 我最快", uid="w-rush")
     record("免@抢答", await send("我最快我最快", uid="w-rush2"), ("抢到第一",))
 
+    # v1.2.0：对局类游戏的免前缀接管。
+    # 每段开始前清掉同类旧局，避免上一条用例留下的对局抢走消息 ——
+    # 这也是真实规则：同一会话可并存多局，靠输入形态区分归属。
+    tk = "aiocqhttp_group_888"
+    plugin._tictactoes.pop(tk, None)
+    await send("井字棋", uid="w-ttt")
+    record("免@井字棋接管", await send("5", uid="w-ttt"), ("你落在",))
+
+    plugin._mines.pop(tk, None)
+    await send("扫雷 4 2", uid="w-mine")
+    _safe = next(i for i, v in enumerate(plugin._mines[tk].cells) if v != -1)
+    record("免@扫雷接管", await send(str(_safe + 1), uid="w-mine"), ("安全",))
+
+    plugin._codes.pop(tk, None)
+    await send("破解 4", uid="w-code")
+    _secret = plugin._codes[tk].secret
+    record("免@破解接管", await send(_secret, uid="w-code"), ("破解成功",))
+
+    # 共存场景：井字棋与破解同时开局时，4 位数字必须归破解，
+    # 单格号仍归井字棋（靠输入形态自动分流，不靠「谁后开谁赢」）
+    plugin._tictactoes.pop(tk, None)
+    plugin._codes.pop(tk, None)
+    await send("井字棋", uid="w-mix")
+    await send("破解 4", uid="w-mix")
+    _mix_secret = plugin._codes[tk].secret
+    record("免@多局共存-破解优先", await send(_mix_secret, uid="w-mix"), ("破解成功",))
+    record("免@多局共存-井字棋仍在", await send("5", uid="w-mix"), ("你落在",))
+
+    # 竞猜到点自动开奖
+    await send("竞猜 测试 | A | B", uid="w-wager")
+    plugin._wagers["aiocqhttp_group_888"].started_at -= 10_000
+    record("免@竞猜自动开奖", await send("随便说点什么", uid="w-wager2"), ("开奖",))
+
     # 关掉免唤醒后应恢复原状（不响应未唤醒消息）
     plugin.config["trigger"]["wake_free"] = False
     quiet = await send("签到", uid="w-off")
@@ -541,6 +624,129 @@ async def main() -> int:
         {"keyword": "你好", "reply": "你也好呀", "exact": False}
     ]
     record("关键词", await h.call("on_message", make_event("你好啊")), ("你也好呀",))
+
+    # ---------- 3b) 第二批扩展玩法 ----------
+    print("\n[指令] v1.2.0 新增玩法")
+
+    # 弹幕竞猜：开盘 -> 下注 -> 开奖，账目必须守恒
+    await run(
+        "竞猜开盘",
+        "竞猜 晚饭吃啥 | 火锅 | 烧烤",
+        ("竞猜开盘", "火锅"),
+        handler="cmd_wager",
+    )
+    gk = "aiocqhttp_group_888"
+    plugin.store.add_balance(gk, "1001", 5000)
+    plugin.store.add_balance(gk, "1002", 5000)
+    before = plugin.store.get_user(gk, "1001")["balance"]
+    await run("下注", "下注 1 100", ("下注", "赔率"), handler="cmd_bet")
+    after_bet = plugin.store.get_user(gk, "1001")["balance"]
+    assert after_bet == before - 100, f"下注应扣 100: {before} -> {after_bet}"
+    await run("下注-超上限", "下注 1 99999999", ("上限",), handler="cmd_bet")
+    # 对手押另一个选项，制造真实的「输家池」
+    await run("下注-对手", "下注 2 300", ("下注",), handler="cmd_bet", uid="1002")
+    # 余额不足要在上限之内验证，才能真的命中「余额」这条分支
+    plugin.store.get_user(gk, "1003")["balance"] = 5
+    await run(
+        "下注-余额不足", "下注 1 500", ("余额不足",), handler="cmd_bet", uid="1003"
+    )
+
+    # 零和口径：下注时各自本金已被扣除，所以「净收益」要拿
+    # 「开奖后的余额」减去「下注前的余额」来算。
+    u2_balance_before_draw = plugin.store.get_user(gk, "1002")["balance"]
+    await run("开奖", "开奖 1", ("开奖",), handler="cmd_draw")
+    u1_after = plugin.store.get_user(gk, "1001")["balance"]
+    u2_after = plugin.store.get_user(gk, "1002")["balance"]
+    u1_gain = u1_after - before  # 1001 押 100 且押中
+    u2_loss = u2_balance_before_draw - u2_after  # 1002 押 300 且未中
+    assert u2_loss == 0, "输家的本金在下注时就扣了，开奖时不应再动"
+    assert u1_gain == 300, f"赢家应当独吞输家的 300，实际 {u1_gain}"
+    record(
+        "竞猜零和结算",
+        f"赢家净得 {u1_gain}｜输家下注时已失 300（开奖不再动）",
+        ("净得 300",),
+    )
+    await run("开奖-无局", "开奖", ("没有进行中的竞猜",), handler="cmd_draw")
+    await run("下注-无局", "下注 1 10", ("没有进行中的竞猜",), handler="cmd_bet")
+
+    # 井字棋
+    await run("井字棋开局", "井字棋", ("井字棋", "1 │"), handler="cmd_tictactoe")
+    out = await run("井字棋落子", "5", ("井字棋",), handler="cmd_tictactoe", raw="5")
+    assert "轮到你" in out or "你赢了" in out or "我赢了" in out or "平局" in out, out
+    # 直接走自动接管（模拟群里不带前缀发格号）
+    ttt_key = "aiocqhttp_group_888"
+    if ttt_key in plugin._tictactoes:
+        plugin._tictactoes.pop(ttt_key)
+
+    # 扫雷
+    await run("扫雷开局", "扫雷 4 3", ("扫雷盘已生成",), handler="cmd_mine")
+    mine_game = plugin._mines["aiocqhttp_group_888"]
+    safe = next(i for i, v in enumerate(mine_game.cells) if v != -1)
+    # 真实链路里玩家是「直接发格号」，走的是自动接管，不是再打一次指令
+    record(
+        "扫雷翻格",
+        await h.call("_mine_open", make_event(str(safe + 1)), cell=safe + 1),
+        ("安全",),
+    )
+    mine = next(i for i, v in enumerate(mine_game.cells) if v == -1)
+    record(
+        "扫雷踩雷",
+        await h.call("_mine_open", make_event(str(mine + 1)), cell=mine + 1),
+        ("踩雷", "扣"),
+    )
+
+    # 数字破解：开局后用「自动接管」提交答案
+    await run("破解开局", "破解 4", ("数字破解开始",), handler="cmd_codebreaker")
+    code_game = plugin._codes["aiocqhttp_group_888"]
+    assert (await h.call("_code_submit", make_event("12"), guess="12")) == "", (
+        "位数不符时不应回应"
+    )
+    record(
+        "破解答对",
+        await h.call(
+            "_code_submit", make_event(code_game.secret), guess=code_game.secret
+        ),
+        ("破解成功", "奖励"),
+    )
+
+    # 抛硬币（无参只抛不押）
+    await run("抛硬币", "抛硬币", ("硬币",), handler="cmd_coin")
+    await run("抛硬币-押注", "抛硬币 正 10", ("你猜 正面",), handler="cmd_coin")
+    await run("抛硬币-脏参", "抛硬币 乱写", ("用法",), handler="cmd_coin")
+
+    # 决斗盘
+    await run("决斗盘-帮助", "决斗盘", ("可选手势",), handler="cmd_rpsls")
+    await run("决斗盘-出招", "决斗盘 石头 10", ("你出 石头",), handler="cmd_rpsls")
+    await run("决斗盘-脏参", "决斗盘 乱写", ("没有识别",), handler="cmd_rpsls")
+
+    # 大转盘
+    plugin.store.add_balance("aiocqhttp_group_888", "1001", 5000)
+    await run("转盘", "转盘", ("大转盘", "余额"), handler="cmd_wheel")
+    await run("转盘-连抽", "转盘 3", ("3 连抽",), handler="cmd_wheel")
+
+    # 成就 / 加成 / 转生
+    await run("成就", "成就", ("成就",), handler="cmd_achievements")
+    await run("我的加成", "我的加成", ("收益加成", "今日折扣"), handler="cmd_bonus")
+    await run("转生-说明", "转生", ("转生说明", "Lv."), handler="cmd_rebirth")
+    # 用一个白板小号验证「未达标」分支（主号已经很富，等级早够了）
+    await run(
+        "转生-未达标", "转生 确认", ("需要 Lv.",), handler="cmd_rebirth", uid="9001"
+    )
+    # 主号等级远超门槛，验证转生成功且积分归零
+    plugin.store.add_balance("aiocqhttp_group_888", "1001", 10000)
+    assert plugin.store.get_user("aiocqhttp_group_888", "1001")["balance"] > 0
+    out = await run("转生-成功", "转生 确认", ("转生成功",), handler="cmd_rebirth")
+    user_after = plugin.store.get_user("aiocqhttp_group_888", "1001")
+    assert user_after["balance"] == 0, f"转生后积分应归零，实际 {user_after['balance']}"
+    assert user_after["rebirth"] == 1
+    assert "×1.05" in out
+
+    # 商店折扣与排行榜新维度
+    store_text = await run("商店折扣", "商店", ("互动商店",), handler="cmd_shop")
+    assert "互动币" in store_text
+    await run("排行榜-井字棋", "排行榜 井字棋", ("井字棋",), handler="cmd_rank")
+    await run("排行榜-转盘", "排行榜 转盘", ("大转盘",), handler="cmd_rank")
+    await run("排行榜-扫雷", "排行榜 扫雷", ("扫雷",), handler="cmd_rank")
 
     # ---------- 4) 守卫 ----------
     plugin.config["enabled"] = False

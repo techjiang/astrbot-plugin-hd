@@ -80,3 +80,76 @@ def test_command_accepts_empty_args(_name):
         probe.validate_and_convert_params([], cf.handler_params)
     except Exception as e:  # noqa: BLE001 - 失败原因要完整带出
         pytest.fail(f"指令 {_name} 无参数解析失败：{cf.print_types()} → {e}")
+
+
+# --------------------------------------------------------------------- 分发键契约
+
+# 分发键测试只需要「能取出 message_str」的极简事件替身，
+# 不必构造真实 AstrMessageEvent —— `_args()` 只读这一个字段。
+_FakeEvent = type(
+    "_FakeEvent", (), {"__init__": lambda self, t: setattr(self, "message_str", t)}
+)
+
+
+@pytest.fixture
+def plugin():
+    """构造一个不落盘的插件实例（配置取空，走全部默认值）。"""
+    return plugin_main.InteractionPlugin(context=None, config={})
+
+
+class TestDispatchCoverage:
+    """免唤醒分发表与指令名剥离表的同步契约。
+
+    免唤醒入口会把消息归一化后查 ``_dispatch`` 表，命中则交给 handler；
+    而 handler 内部一律用 ``_args(event)`` 自行剥离指令名，剥离依据是
+    ``COMMAND_NAMES``。
+
+    两处**必须保持同步**：只要 ``_dispatch`` 里挂了某个触发词，它就必须
+    出现在 ``COMMAND_NAMES`` 里。否则：
+
+    - 免唤醒命中没问题（dispatch 有它）；
+    - 但 ``_args()`` 剥不掉它，于是 ``抛硬币 正 10`` 会把 ``抛硬币``
+      当成第一个参数 —— 表现为「指令能触发，但参数永远解析不对」。
+
+    这类 bug 极隐蔽（指令「有反应」，只是行为不对），因此用结构断言锁死：
+    新增任何触发词时，漏加 ``COMMAND_NAMES`` 会直接让测试变红。
+    """
+
+    def test_every_dispatch_key_is_strippable(self, plugin):
+        keys = set(plugin._dispatch)
+        names = set(plugin_main.COMMAND_NAMES)
+        missing = sorted(keys - names)
+        assert not missing, (
+            "以下免唤醒触发词没有出现在 COMMAND_NAMES 里，"
+            f"会导致带参指令解析错误：{missing}"
+        )
+
+    def test_dispatch_keys_have_no_whitespace(self, plugin):
+        """分发键不能含空白，否则永远匹配不上（归一化会把空白压成单空格）。"""
+        bad = [k for k in plugin._dispatch if k != k.strip() or " " in k]
+        assert not bad, f"分发键含空白: {bad}"
+
+    def test_args_strips_every_dispatch_key(self, plugin):
+        """每一个分发键都必须能被 ``_args`` 完整剥离。"""
+        failed: list[str] = []
+        for key in plugin._dispatch:
+            event = _FakeEvent(f"{key} 测试参数")
+            if plugin._args(event) != "测试参数":
+                failed.append(key)
+        assert not failed, f"以下触发词剥离失败: {failed}"
+
+    def test_args_strips_bare_command_without_args(self, plugin):
+        """不带参数时，剥离结果必须是空串（不能把指令名当参数）。"""
+        failed = [k for k in plugin._dispatch if plugin._args(_FakeEvent(k)) != ""]
+        assert not failed, f"以下触发词无参时未剥净: {failed}"
+
+    def test_longest_key_wins_in_resolution(self, plugin):
+        """匹配必须「最长优先」，否则「投票结果」会被「投票」抢走。"""
+        for text, expect in (
+            ("投票结果 abc", "abc"),
+            ("互动状态", ""),
+            ("我的加成", ""),
+        ):
+            hit = plugin._resolve_command(text)
+            assert hit is not None, text
+            assert hit[1] == expect, (text, hit[1], expect)

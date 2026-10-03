@@ -67,6 +67,19 @@ USER_FIELDS: dict[str, Any] = {
     "frames": [],  # 已解锁头像框
     "bag": {},  # 背包：道具 ID -> 数量
     "intimacy": {},  # 与他人的亲密度：a|b -> 点数
+    # ---- 第二批扩展玩法字段（v1.2.0）----
+    "rebirth": 0,  # 转生次数（提供永久收益加成）
+    "achievements": [],  # 已解锁成就码
+    "ttt_win": 0,  # 井字棋胜场
+    "mine_clear": 0,  # 扫雷通关次数
+    "mine_open": 0,  # 扫雷累计翻开安全格
+    "code_win": 0,  # 数字破解成功次数
+    "coin_win": 0,  # 抛硬币猜中次数
+    "wager_win": 0,  # 弹幕竞猜猜中次数
+    "wager_total": 0,  # 弹幕竞猜参与次数
+    "wheel_count": 0,  # 大转盘转动次数
+    "soup_open": 0,  # 海龟汤开局次数
+    "last_wheel_ts": 0,  # 上次转盘时间（冷却用）
 }
 
 
