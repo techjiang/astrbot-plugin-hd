@@ -108,6 +108,10 @@ DEFAULT_CONFIG = {
         "gift_intimacy": 5,
         "duel_stake": 20,
     },
+    "boss": {"enabled": True, "max_spend": 5000},
+    "season": {"enabled": True},
+    "pet": {"enabled": True},
+    "achievements": {"enabled": True},
 }
 
 
@@ -830,3 +834,361 @@ async def test_new_features_respect_master_switch(plugin):
     ):
         out = await run(plugin, method, make_event(text))
         assert "已关闭" in out, (method, out)
+
+
+# ------------------------------------------------------- v1.3.0 标签体系
+
+
+@pytest.mark.asyncio
+async def test_tags_overview_shows_summary(plugin):
+    out = await run(plugin, "cmd_tags", make_event("标签"))
+    assert "标签收集" in out
+    assert "最接近完成" in out
+    assert "%" in out
+
+
+@pytest.mark.asyncio
+async def test_tags_filter_by_rarity_excludes_others(plugin):
+    out = await run(plugin, "cmd_tags", make_event("标签 稀有"))
+    assert "稀有" in out
+    assert "普通" not in out
+
+
+@pytest.mark.asyncio
+async def test_tags_filter_by_category(plugin):
+    out = await run(plugin, "cmd_tags", make_event("标签 日常"))
+    assert "日常" in out
+    assert "签到" in out
+
+
+@pytest.mark.asyncio
+async def test_tags_search_normalizes_punctuation(plugin):
+    """「标签 搜索 签到！」尾部标点不能被带进关键词，否则查不到。"""
+    out = await run(plugin, "cmd_tags", make_event("标签 搜索 签到！"))
+    assert "关键词「签到」" in out
+    assert "签到七日" in out
+
+
+@pytest.mark.asyncio
+async def test_tags_search_no_match(plugin):
+    out = await run(plugin, "cmd_tags", make_event("标签 搜索 完全不存在的词"))
+    assert "没有匹配" in out
+
+
+@pytest.mark.asyncio
+async def test_tag_search_command_requires_keyword(plugin):
+    out = await run(plugin, "cmd_tag_search", make_event("标签搜索"))
+    assert "用法" in out
+
+
+@pytest.mark.asyncio
+async def test_tag_search_command_delegates(plugin):
+    out = await run(plugin, "cmd_tag_search", make_event("标签搜索 抽奖"))
+    assert "抽奖" in out
+
+
+@pytest.mark.asyncio
+async def test_tags_parse_free_word_order(plugin):
+    """筛选词与关键词的相对顺序不影响解析结果。"""
+    query, _cat, rarity, _locked, _unlocked = plugin._parse_tag_args("稀有 抽奖")
+    assert query == "抽奖"
+    assert rarity == "rare"
+
+    query, _cat, rarity, _locked, _unlocked = plugin._parse_tag_args("抽奖 稀有")
+    assert query == "抽奖"
+    assert rarity == "rare"
+
+
+@pytest.mark.asyncio
+async def test_tags_parse_search_swallows_rest(plugin):
+    """「搜索」之后的全部内容都算关键词 —— 这是有意为之。
+
+    否则用户搜「搜索 签到 七日」时，第二个词会被误判成筛选条件。
+    """
+    query, _cat, _rar, _locked, _unlocked = plugin._parse_tag_args(
+        "稀有 搜索 抽奖 稀有"
+    )
+    assert query == "抽奖 稀有"
+
+
+@pytest.mark.asyncio
+async def test_tags_parse_only_unlocked(plugin):
+    query, _cat, _rar, locked, unlocked = plugin._parse_tag_args("已获得")
+    assert query == "" and unlocked is True and locked is False
+
+
+@pytest.mark.asyncio
+async def test_achievements_page_includes_rarity_badge(plugin):
+    out = await run(plugin, "cmd_achievements", make_event("成就"))
+    assert "稀有" in out or "传说" in out
+
+
+# ------------------------------------------------------- v1.3.0 群 Boss 战
+
+
+@pytest.mark.asyncio
+async def test_boss_start_creates_fight(plugin):
+    out = await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    assert "群 Boss 战开始" in out
+    assert "史莱姆王" in out
+    assert "aiocqhttp_group_888" in plugin._bosses
+
+
+@pytest.mark.asyncio
+async def test_boss_start_rejects_unknown_name(plugin):
+    out = await run(plugin, "cmd_boss", make_event("讨伐 不存在"))
+    assert "没有这个 Boss" in out
+    assert "aiocqhttp_group_888" not in plugin._bosses
+
+
+@pytest.mark.asyncio
+async def test_boss_start_rejects_duplicate(plugin):
+    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    out = await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    assert "已在讨伐" in out
+
+
+@pytest.mark.asyncio
+async def test_boss_attack_without_fight(plugin):
+    out = await run(plugin, "cmd_boss_attack", make_event("攻击 100"))
+    assert "没有进行中的讨伐" in out
+
+
+@pytest.mark.asyncio
+async def test_boss_attack_zero_spend(plugin):
+    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    out = await run(plugin, "cmd_boss_attack", make_event("攻击 0"))
+    assert "大于 0" in out
+
+
+@pytest.mark.asyncio
+async def test_boss_attack_caps_spend(plugin):
+    plugin.config["boss"]["max_spend"] = 100
+    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    plugin.store.add_balance("aiocqhttp_group_888", "1001", 10000)
+    out = await run(plugin, "cmd_boss_attack", make_event("攻击 500"))
+    assert "最多投入" in out
+
+
+@pytest.mark.asyncio
+async def test_boss_attack_insufficient_balance(plugin):
+    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    out = await run(plugin, "cmd_boss_attack", make_event("攻击 100"))
+    assert "积分不足" in out
+
+
+@pytest.mark.asyncio
+async def test_boss_attack_deducts_balance(plugin):
+    plugin.store.add_balance("aiocqhttp_group_888", "1001", 1000)
+    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    await run(plugin, "cmd_boss_attack", make_event("攻击 300"))
+    assert plugin.store.get_user("aiocqhttp_group_888", "1001")["balance"] == 700
+
+
+@pytest.mark.asyncio
+async def test_boss_kill_is_net_negative_and_conserved(plugin):
+    """击杀后分得的总额必须等于奖池，且小于投入（合作有损耗）。"""
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 2000)
+    plugin.store.add_balance(key, "1002", 2000)
+    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    await run(
+        plugin,
+        "cmd_boss_attack",
+        make_event("攻击 500"),
+    )
+    await run(plugin, "cmd_boss_attack", make_event("攻击 1500", uid="1002"))
+    # 史莱姆王 1200 HP：1001 投入 500 打 500 点，1002 请求 1500 点，
+    # 但 Boss 只剩 700 HP，所以只结算 700 点、退回 800。
+    # 总投入 1200，分得奖池 700 ⇒ 群总资产净减 500（合作有损耗）。
+    u1 = plugin.store.get_user(key, "1001")
+    u2 = plugin.store.get_user(key, "1002")
+    pool_paid = u1["boss_gold"] + u2["boss_gold"]
+    assert pool_paid == 700, f"分得的总额必须等于奖池 700，实际 {pool_paid}"
+
+    # 溢出退款：1002 实际只该被扣 700（成就奖励另算，单列核对）
+    ach_bonus = sum(
+        reward
+        for code, _n, _f, _t, reward in plugin_main.games_plus.ACHIEVEMENTS
+        if code in u2["achievements"]
+    )
+    assert u2["balance"] == 2000 - 700 + u2["boss_gold"] + ach_bonus
+    assert u2["boss_damage"] == 700, "记功要按实际打出的伤害，不是请求值"
+    assert u1["boss_damage"] == 500
+
+    total_after = u1["balance"] + u2["balance"]
+    assert total_after < 4000, "Boss 战必须让群总资产净减"
+    assert key not in plugin._bosses, "击杀后对局应被回收"
+    assert u2["boss_kill"] == 1
+    assert u1["boss_kill"] == 0, "只给最后一击记击杀数"
+
+
+@pytest.mark.asyncio
+async def test_boss_attack_below_cost_refunds(plugin):
+    """投入不足以折算 1 点伤害时，必须原样退回，不能沉默扣款。"""
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 100)
+    plugin._bosses[key] = plugin_main.games_world.BossFight.create("slime", 0)
+    plugin._bosses[key].cost = 50  # 人为抬高门槛
+    out = await run(plugin, "cmd_boss_attack", make_event("攻击 10"))
+    assert "至少投入" in out
+    assert plugin.store.get_user(key, "1001")["balance"] == 100, "未造成伤害必须退款"
+
+
+@pytest.mark.asyncio
+async def test_boss_info_without_fight(plugin):
+    out = await run(plugin, "cmd_boss_info", make_event("讨伐状态"))
+    assert "没有进行中的讨伐" in out
+
+
+@pytest.mark.asyncio
+async def test_boss_info_lists_damage_ranking(plugin):
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 500)
+    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    await run(plugin, "cmd_boss_attack", make_event("攻击 100"))
+    out = await run(plugin, "cmd_boss_info", make_event("讨伐状态"))
+    assert "伤害榜" in out
+    assert "100" in out
+
+
+# ------------------------------------------------------- v1.3.0 赛季
+
+
+@pytest.mark.asyncio
+async def test_season_status_shows_tier(plugin):
+    out = await run(plugin, "cmd_season", make_event("赛季"))
+    assert "赛季" in out
+    assert "段位" in out
+
+
+@pytest.mark.asyncio
+async def test_season_claim_credits_balance(plugin):
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 2000)
+    before = plugin.store.get_user(key, "1001")["balance"]
+    out = await run(plugin, "cmd_season", make_event("赛季 领取"))
+    assert "领取了" in out
+    after = plugin.store.get_user(key, "1001")["balance"]
+    assert after > before
+
+
+@pytest.mark.asyncio
+async def test_season_claim_is_idempotent(plugin):
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 2000)
+    await run(plugin, "cmd_season", make_event("赛季 领取"))
+    after_first = plugin.store.get_user(key, "1001")["balance"]
+    out = await run(plugin, "cmd_season", make_event("赛季 领取"))
+    assert "已领满" in out
+    assert plugin.store.get_user(key, "1001")["balance"] == after_first
+
+
+@pytest.mark.asyncio
+async def test_season_base_tier_is_claimable(plugin):
+    """青铜段位有底奖（设计如此：有进度就有正反馈），不是错误分支。"""
+    out = await run(plugin, "cmd_season", make_event("赛季 领取"))
+    assert "领取了" in out
+    assert "青铜" in out
+
+
+@pytest.mark.asyncio
+async def test_season_claim_after_full_claim(plugin):
+    """已领满后再领必须被拒绝，且不动余额。"""
+    key = "aiocqhttp_group_888"
+    await run(plugin, "cmd_season", make_event("赛季 领取"))
+    after = plugin.store.get_user(key, "1001")["balance"]
+    out = await run(plugin, "cmd_season", make_event("赛季 领取"))
+    assert "已领满" in out
+    assert plugin.store.get_user(key, "1001")["balance"] == after
+
+
+@pytest.mark.asyncio
+async def test_season_gain_resets_on_new_season(plugin):
+    """跨赛季必须清零增量，但不该动总积分。"""
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 500)
+    user = plugin.store.get_user(key, "1001")
+    user["season_tag"] = "2000-01"  # 伪造一个旧赛季
+    out = await run(plugin, "cmd_season", make_event("赛季"))
+    assert "2026-" in out or "202" in out
+    assert plugin.store.get_user(key, "1001")["season_gain"] == 0
+    assert plugin.store.get_user(key, "1001")["balance"] == 500
+
+
+# ------------------------------------------------------- v1.3.0 宠物
+
+
+@pytest.mark.asyncio
+async def test_pet_adopt_then_feed(plugin):
+    out = await run(plugin, "cmd_pet", make_event("宠物"))
+    assert "领养" in out
+    out = await run(plugin, "cmd_pet_feed", make_event("喂食"))
+    assert "照料了" in out
+    assert plugin.store.get_user("aiocqhttp_group_888", "1001")["pet"]["care"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pet_feed_has_cooldown(plugin):
+    await run(plugin, "cmd_pet", make_event("宠物"))
+    await run(plugin, "cmd_pet_feed", make_event("喂食"))
+    out = await run(plugin, "cmd_pet_feed", make_event("喂食"))
+    assert "别喂太急" in out
+    assert plugin.store.get_user("aiocqhttp_group_888", "1001")["pet"]["care"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pet_feed_without_adoption(plugin):
+    out = await run(plugin, "cmd_pet_feed", make_event("喂食"))
+    assert "还没有宠物" in out
+
+
+@pytest.mark.asyncio
+async def test_pet_name_requires_adoption(plugin):
+    out = await run(plugin, "cmd_pet_name", make_event("起名 小互动"))
+    assert "还没有宠物" in out
+
+
+@pytest.mark.asyncio
+async def test_pet_name_empty(plugin):
+    await run(plugin, "cmd_pet", make_event("宠物"))
+    out = await run(plugin, "cmd_pet_name", make_event("起名"))
+    assert "用法" in out
+
+
+@pytest.mark.asyncio
+async def test_pet_name_too_long(plugin):
+    await run(plugin, "cmd_pet", make_event("宠物"))
+    out = await run(plugin, "cmd_pet_name", make_event("起名 " + "超" * 20))
+    assert "太长" in out
+
+
+@pytest.mark.asyncio
+async def test_pet_name_success(plugin):
+    await run(plugin, "cmd_pet", make_event("宠物"))
+    out = await run(plugin, "cmd_pet_name", make_event("起名 小互动"))
+    assert "小互动" in out
+    assert (
+        plugin.store.get_user("aiocqhttp_group_888", "1001")["pet"]["name"] == "小互动"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pet_gain_is_bounded(plugin):
+    """无论怎么喂，单次产出都不能超过设计上限（防印钞）。"""
+    key = "aiocqhttp_group_888"
+    await run(plugin, "cmd_pet", make_event("宠物"))
+    for _i in range(30):
+        user = plugin.store.get_user(key, "1001")
+        user["pet"]["fed_at"] = 0  # 绕过冷却，直接压测收益
+        await run(plugin, "cmd_pet_feed", make_event("喂食"))
+    total = plugin.store.get_user(key, "1001")["balance"]
+    assert total <= 30 * plugin_main.games_world.PET_MAX_GAIN
+
+
+@pytest.mark.asyncio
+async def test_bonus_shows_new_sections(plugin):
+    out = await run(plugin, "cmd_bonus", make_event("我的加成"))
+    assert "标签" in out
+    assert "赛季" in out
+    assert "宠物" in out

@@ -9,5 +9,5 @@
 #
 # 质量校验：
 #   ruff format . && ruff check .      # 代码风格
-#   python -m pytest tests -q          # 347 项单元/集成测试
-#   python tools/e2e_smoke.py          # 真实 AstrBot 框架下的 132 项冒烟测试
+#   python -m pytest tests -q          # 510 项单元/集成测试
+#   python tools/e2e_smoke.py          # 真实 AstrBot 框架下的 165 项冒烟测试

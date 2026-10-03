@@ -748,6 +748,150 @@ async def main() -> int:
     await run("排行榜-转盘", "排行榜 转盘", ("大转盘",), handler="cmd_rank")
     await run("排行榜-扫雷", "排行榜 扫雷", ("扫雷",), handler="cmd_rank")
 
+    # ---------- 3c) 第三批扩展玩法（v1.3.0）----------
+    print("\n[指令] v1.3.0 新增玩法")
+
+    # 标签：概览 / 筛选 / 搜索 / 组合
+    await run("标签-概览", "标签", ("标签收集", "最接近完成"), handler="cmd_tags")
+    await run("标签-稀有", "标签 稀有", ("稀有",), handler="cmd_tags")
+    await run("标签-分类", "标签 日常", ("日常",), handler="cmd_tags")
+    await run("标签-已获得", "标签 已获得", ("标签收集",), handler="cmd_tags")
+    await run(
+        "标签-搜索", "标签 搜索 签到", ("关键词「签到」", "签到"), handler="cmd_tags"
+    )
+    await run("标签-组合", "标签 运气 稀有", ("稀有",), handler="cmd_tags")
+    await run("标签-无匹配", "标签 搜索 不存在的词", ("没有匹配",), handler="cmd_tags")
+    await run("标签搜索-无参", "标签搜索", ("用法",), handler="cmd_tag_search")
+    await run(
+        "标签搜索-有参",
+        "标签搜索 抽奖",
+        ("关键词「抽奖」", "抽奖"),
+        handler="cmd_tag_search",
+    )
+    # 标签的筛选必须真的改变结果集：稀有筛选不能返回普通级条目
+    rare_out = await run("标签-稀有过滤", "标签 稀有", ("稀有",), handler="cmd_tags")
+    assert "普通" not in rare_out, f"稀有筛选不该混入普通级：{rare_out}"
+
+    # 群 Boss 战：开 -> 攻击 -> 状态 -> 击杀结算
+    gk = "aiocqhttp_group_888"
+    await run(
+        "讨伐-开局", "讨伐 slime", ("群 Boss 战开始", "史莱姆王"), handler="cmd_boss"
+    )
+    await run("讨伐-重复开", "讨伐 slime", ("已在讨伐",), handler="cmd_boss")
+    await run("攻击-无投入", "攻击 0", ("大于 0",), handler="cmd_boss_attack")
+    await run("攻击-超上限", "攻击 99999999", ("最多投入",), handler="cmd_boss_attack")
+
+    plugin.store.get_user(gk, "1001")["balance"] = 300
+    plugin.store.get_user(gk, "1002")["balance"] = 3000
+    b1_before = plugin.store.get_user(gk, "1001")["balance"]
+    b2_before = plugin.store.get_user(gk, "1002")["balance"]
+    await run("攻击-1号", "攻击 300", ("造成 300 点伤害",), handler="cmd_boss_attack")
+    assert plugin.store.get_user(gk, "1001")["balance"] == b1_before - 300
+    await run("攻击-2号", "攻击 3000", ("击败",), handler="cmd_boss_attack", uid="1002")
+    b2_after = plugin.store.get_user(gk, "1002")["balance"]
+
+    # 史莱姆王 1200 HP：1001 打 300 点，1002 请求 3000 但只剩 900 HP，
+    # 所以只扣 900、退回 2100。总投入 1200，奖池 700。
+    u1 = plugin.store.get_user(gk, "1001")
+    u2 = plugin.store.get_user(gk, "1002")
+    gained = u1["boss_gold"] + u2["boss_gold"]
+    assert gained == 700, f"分得总额应等于奖池 700，实际 {gained}"
+    assert u2["boss_damage"] == 900, f"记功按实际伤害，实际 {u2['boss_damage']}"
+    spent = 1200
+    assert gained < spent, "Boss 战不能让玩家净赚"
+    # 溢出退款：1002 只该被扣 900（成就奖励另算）
+    ach_bonus = sum(
+        reward
+        for code, _n, _f, _t, reward in plugin_main.games_plus.ACHIEVEMENTS
+        if code in u2["achievements"]
+    )
+    assert b2_after == b2_before - 900 + u2["boss_gold"] + ach_bonus, (
+        f"溢出必须退款：{b2_before} -> {b2_after}"
+    )
+    record(
+        "Boss 战经济守恒",
+        f"投入 {spent}｜分得 {gained}（奖池封顶，净亏 {spent - gained}）",
+        ("",),
+    )
+    await run(
+        "讨伐状态-无局", "讨伐状态", ("没有进行中的讨伐",), handler="cmd_boss_info"
+    )
+
+    # 赛季：查看 + 领取（幂等）
+    season_uid = "1001"
+    await run(
+        "赛季-查看", "赛季", ("的赛季", "段位"), handler="cmd_season", uid=season_uid
+    )
+    gain_now = plugin.store.get_user(gk, season_uid)["season_gain"]
+    expected_reward = plugin_main.games_world.season_reward(gain_now)
+    assert expected_reward > 0, "有积分增量却没有可领奖励，说明赛季口径断了"
+    balance_before_claim = plugin.store.get_user(gk, season_uid)["balance"]
+    season_out = await run(
+        "赛季-领取", "赛季 领取", ("领取了",), handler="cmd_season", uid=season_uid
+    )
+    assert f"{expected_reward}" in season_out, f"领取额与口径不符：{season_out}"
+    balance_after_claim = plugin.store.get_user(gk, season_uid)["balance"]
+    assert balance_after_claim == balance_before_claim + expected_reward, (
+        "领取额必须与余额变化严格一致"
+    )
+    # 二次领取必须被拒绝（幂等），且不能改变余额
+    await run(
+        "赛季-重复领取", "赛季 领取", ("已领满",), handler="cmd_season", uid=season_uid
+    )
+    assert plugin.store.get_user(gk, season_uid)["balance"] == balance_after_claim
+
+    # 宠物：领养 -> 喂食 -> 冷却 -> 起名 -> 查看
+    pet_uid = "7001"
+    await run("宠物-领养", "宠物", ("领养",), handler="cmd_pet", uid=pet_uid)
+    await run("宠物-喂食", "喂食", ("照料了",), handler="cmd_pet_feed", uid=pet_uid)
+    await run("宠物-冷却", "喂食", ("别喂太急",), handler="cmd_pet_feed", uid=pet_uid)
+    await run(
+        "宠物-起名", "起名 小互动", ("已改名",), handler="cmd_pet_name", uid=pet_uid
+    )
+    named = await run("宠物-状态", "宠物", ("小互动",), handler="cmd_pet", uid=pet_uid)
+    assert "蛋" in named or "幼体" in named, named
+    await run(
+        "宠物-名字过长",
+        "起名 " + "超" * 30,
+        ("太长",),
+        handler="cmd_pet_name",
+        uid=pet_uid,
+    )
+    # 未领养的用户喂食应被引导去领养，而不是崩溃
+    await run(
+        "宠物-未领养喂食", "喂食", ("还没有宠物",), handler="cmd_pet_feed", uid="7002"
+    )
+
+    # 新排行榜维度：断言必须落在「排行榜」标题上，
+    # 否则参数没匹配上时返回的用法文本里也含「本赛季积分」，会假通过。
+    await run(
+        "排行榜-Boss伤害",
+        "排行榜 boss伤害",
+        ("本群Boss 伤害排行榜",),
+        handler="cmd_rank",
+    )
+    await run(
+        "排行榜-Boss击杀",
+        "排行榜 boss击杀",
+        ("本群Boss 击杀排行榜",),
+        handler="cmd_rank",
+    )
+    await run(
+        "排行榜-赛季",
+        "排行榜 本赛季积分",
+        ("本群本赛季积分排行榜",),
+        handler="cmd_rank",
+    )
+    await run(
+        "排行榜-非法维度",
+        "排行榜 乱写",
+        ("可排行维度",),
+        handler="cmd_rank",
+    )
+    # 成就页要带上稀有度徽章
+    ach_out = await run("成就-带稀有度", "成就", ("成就",), handler="cmd_achievements")
+    assert "稀有" in ach_out or "传说" in ach_out, ach_out
+
     # ---------- 4) 守卫 ----------
     plugin.config["enabled"] = False
     await run("总开关关闭", "签到", ("已关闭",), handler="cmd_sign")

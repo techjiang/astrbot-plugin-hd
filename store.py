@@ -80,7 +80,36 @@ USER_FIELDS: dict[str, Any] = {
     "wheel_count": 0,  # 大转盘转动次数
     "soup_open": 0,  # 海龟汤开局次数
     "last_wheel_ts": 0,  # 上次转盘时间（冷却用）
+    # ---- 成就解锁时间（v1.3.0，供标签体系按获得时间排序）----
+    "achievement_ts": {},  # 成就码 -> unix 时间戳
+    # ---- 第三批扩展玩法字段（v1.3.0）----
+    "boss_kill": 0,  # 击杀 Boss 次数
+    "boss_damage": 0,  # 累计对 Boss 伤害
+    "boss_gold": 0,  # 从 Boss 战分得的积分总额
+    "pet": {},  # 宠物状态：{name, care, fed_at, born}
+    "season_tag": "",  # 上次结算的赛季标识
+    "season_gain": 0,  # 本季累计积分增量
+    "season_reward": 0,  # 本季已领奖励合计
 }
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    """把任意值安全转成整数。
+
+    档案是落盘的 JSON，可能被手工编辑或由旧版本写入脏值；
+    用裸 ``int()`` 会让一次「加分」把整条指令打挂。
+
+    Args:
+        value: 原始值。
+        default: 转换失败时的回退值。
+
+    Returns:
+        整数。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 class InteractionStore:
@@ -361,7 +390,16 @@ class InteractionStore:
             变更后的余额。
         """
         user = self.get_user(session_key, user_id)
-        user["balance"] = max(0, int(user["balance"]) + int(amount))
+        before = max(0, int(user["balance"]))
+        after = max(0, before + int(amount))
+        user["balance"] = after
+        # 赛季增量只统计「净增」部分：这样它天然包含所有玩法，
+        # 不必在每个结算点手工累加，也不会因漏改某处而失真。
+        delta = after - before
+        if delta > 0:
+            # 用 _to_int 而不是 int()：档案是用户可见的 JSON，手工改坏过
+            # （或旧版本留下脏值）时，不能让一次加分把整条指令打挂。
+            user["season_gain"] = max(0, _to_int(user.get("season_gain"), 0)) + delta
         self._mark_dirty(session_key)
         return user["balance"]
 
@@ -384,12 +422,12 @@ class InteractionStore:
         if str(src) == str(dst):
             return False, "不能给自己转账哦。"
         payer = self.get_user(session_key, src)
-        if int(payer["balance"]) < amount:
+        if _to_int(payer["balance"], 0) < amount:
             return False, f"余额不足，当前只有 {payer['balance']}。"
-        payer["balance"] = int(payer["balance"]) - amount
-        receiver = self.get_user(session_key, dst)
-        receiver["balance"] = int(receiver["balance"]) + amount
-        self._mark_dirty(session_key)
+        # 走 add_balance 而不是直接改 balance：赛季增量等派生统计
+        # 只在 add_balance 里维护，绕过它会让收款人「白得积分却不算成绩」。
+        self.add_balance(session_key, src, -amount)
+        self.add_balance(session_key, dst, amount)
         return True, "ok"
 
     def top_users(
