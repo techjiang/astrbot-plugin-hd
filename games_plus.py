@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 import time
 from collections import Counter
@@ -841,8 +842,53 @@ WHEEL_SECTORS: list[tuple[int, str, int, str]] = [
 WHEEL_BASE_COST = 50
 
 
+def wheel_payout_ev() -> float:
+    """返回转盘「只算积分奖励」的期望回报。
+
+    称号扇区按 0 价值计入（玩家可以完全不在乎称号），这是最严苛的口径。
+
+    Returns:
+        单次转动的期望积分回报。
+    """
+    total = sum(w for w, *_ in WHEEL_SECTORS)
+    return sum(w * v for w, kind, v, _l in WHEEL_SECTORS if kind == "amount") / total
+
+
+# 回收率上限：期望回报不得达到消耗的该比例，留出安全边际。
+# 转盘是「回收过量积分」的机制，一旦回收率 >= 1 就变成印钞机。
+WHEEL_MAX_PAYOUT_RATIO = 0.95
+
+
+def wheel_cost_floor() -> int:
+    """返回转盘消耗的安全下限。
+
+    期望回报是固定值，所以只要消耗低于某个阈值，转盘就会变成正期望的印钞机
+    （例如把 ``wheel.cost`` 配成 0 或 20）。这里按「回收率 <= 0.95」反推一个
+    下限，运行期把配置值抬到该下限，保证**任何配置**下期望都严格为负。
+
+    Returns:
+        安全的最小消耗（整数，向上取整）。
+    """
+    return max(1, math.ceil(wheel_payout_ev() / WHEEL_MAX_PAYOUT_RATIO))
+
+
+def normalize_wheel_cost(cost: object) -> int:
+    """把配置里的转盘消耗收敛到安全区间。
+
+    Args:
+        cost: 配置值（可能是字符串 / 负数 / None 等脏数据）。
+
+    Returns:
+        不小于 :func:`wheel_cost_floor` 的单次消耗。
+    """
+    return max(wheel_cost_floor(), max(0, _safe_int(cost)))
+
+
 def wheel_spin(cost: int, rng: random.Random | None = None) -> tuple[str, int, str]:
     """转动一次大转盘。
+
+    ``cost`` 会被 :func:`normalize_wheel_cost` 抬到安全下限，因此即便配置把
+    消耗写成 0，返回值也不会出现「零成本净赚」的正期望。
 
     Args:
         cost: 单次消耗（并入返回值，便于调用方直接结算）。
@@ -852,11 +898,12 @@ def wheel_spin(cost: int, rng: random.Random | None = None) -> tuple[str, int, s
         ``(类型, 积分净变动, 展示文本)``，类型为 ``amount`` / ``item``。
     """
     rng = rng or random
+    paid = normalize_wheel_cost(cost)
     weights = [w for w, *_ in WHEEL_SECTORS]
     _, kind, value, label = rng.choices(WHEEL_SECTORS, weights=weights, k=1)[0]
     if kind == "amount":
-        return "amount", int(value) - max(0, _safe_int(cost)), label
-    return "item", -max(0, _safe_int(cost)), label
+        return "amount", int(value) - paid, label
+    return "item", -paid, label
 
 
 # --------------------------------------------------------------------- 成就系统

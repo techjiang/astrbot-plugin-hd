@@ -1356,3 +1356,97 @@ async def test_rpsls_wager_is_zero_sum_even_with_rebirth(plugin):
         else:  # 输或平
             assert delta >= -bet
     assert seen_win, "300 局一次都没赢，种子或逻辑有问题"
+
+
+# ------------------------------------------------------- 回归：转盘消耗安全下限
+
+
+def test_wheel_cost_floor_keeps_expectation_negative():
+    """安全下限必须真的把回收率压到 1 以下（4% 概率的称号按 0 价值计）。
+
+    期望回报是固定值，消耗配得低于它就会变成正期望的印钞机
+    （例如把 ``wheel.cost`` 配成 0）。
+    """
+    gp = plugin_main.games_plus
+    floor = gp.wheel_cost_floor()
+    assert floor == gp.normalize_wheel_cost(0)
+    assert floor == gp.normalize_wheel_cost(-999)
+    assert floor == gp.normalize_wheel_cost("abc")
+    assert gp.wheel_payout_ev() < floor
+    # 正常值不应被改动
+    assert gp.normalize_wheel_cost(50) == 50
+
+
+def test_wheel_spin_cannot_be_free_money():
+    """即便传入成本 0，单次期望也必须严格为负。"""
+    import random as _random
+
+    gp = plugin_main.games_plus
+    rng = _random.Random(7)
+    total = 0
+    rounds = 20000
+    for _ in range(rounds):
+        _kind, delta, _label = gp.wheel_spin(0, rng)
+        total += delta
+    assert total < 0, f"零成本转盘的累计净变动应为负，实际 {total}"
+
+
+@pytest.mark.asyncio
+async def test_wheel_zero_cost_is_floored(plugin, monkeypatch):
+    """把消耗配成 0 也不能变成印钞机：消耗会被抬到安全下限。"""
+    key = "aiocqhttp_group_888"
+    plugin.config["wheel"] = {"enabled": True, "cost": 0, "max_spins": 10}
+    user = plugin.store.get_user(key, "1001")
+    # 余额刻意放在「不会触发任何成就」的区间，避免成就奖励干扰账目
+    user["balance"] = 100
+    floor = plugin_main.games_plus.wheel_cost_floor()
+    _force_wheel(plugin, monkeypatch, 0)
+    out = await run(plugin, "cmd_wheel", make_event("转盘"))
+    assert floor >= 1
+    assert f"消耗 {floor}" in out
+    assert f"本次净变动 -{floor}" in out
+    assert plugin.store.get_user(key, "1001")["balance"] == 100 - floor
+
+
+# ------------------------------------------------------- 回归：免唤醒路径的冷却
+
+
+@pytest.mark.asyncio
+async def test_wake_free_cooldown_does_not_double_consume(plugin):
+    """免唤醒路径 + 冷却开启时，指令必须能执行（而不是一律「操作太快」）。
+
+    历史 bug：``_run_command`` 与 handler 各调一次 ``_guard``，冷却被消费
+    两次，只要 ``permission.cooldown_seconds`` > 0，免唤醒路径下所有指令
+    都回「操作太快啦」。
+    """
+    plugin.config["permission"] = {"group_only": True, "cooldown_seconds": 60}
+    event = make_event("签到")
+    event.is_at_or_wake_command = False  # 走免唤醒路径
+    await plugin.on_message(event)
+    sent = [s.get_plain_text() for s in getattr(event, "sent", [])]
+    assert sent, "免唤醒路径必须给出回执"
+    assert "操作太快" not in sent[0], sent[0]
+
+
+@pytest.mark.asyncio
+async def test_wake_free_cooldown_keyed_by_command_not_args(plugin):
+    """冷却必须按「指令」隔离，而不是按参数串。
+
+    历史 bug：``handler, name, _rest = hit`` 把参数当触发词传下去，
+    发「转盘 1」把冷却键记成 "1"、「转盘 2」记成 "2"，同一条指令连点反而
+    不会被拦。
+    """
+    plugin.config["permission"] = {"group_only": True, "cooldown_seconds": 60}
+    plugin.config["wheel"] = {"enabled": True, "cost": 50, "max_spins": 10}
+    plugin.store.get_user("aiocqhttp_group_888", "1001")["balance"] = 100000
+
+    async def send(text: str) -> str:
+        event = make_event(text)
+        event.is_at_or_wake_command = False
+        await plugin.on_message(event)
+        return getattr(event, "sent", [None])[0].get_plain_text() if event.sent else ""
+
+    first = await send("转盘 1")
+    assert "操作太快" not in first, first
+    second = await send("转盘 2")
+    assert "操作太快" in second, second

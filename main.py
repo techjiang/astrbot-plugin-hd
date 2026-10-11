@@ -924,10 +924,13 @@ class InteractionPlugin(Star):
         if self._bool("trigger", "wake_free", default=True):
             hit = self._resolve_command(text)
             if hit is not None:
-                handler, name, _rest = hit
-                # 统一让 handler 用 _args() 自行剥离指令名：那边有完整的
-                # COMMAND_NAMES 表，比这里按单个触发词剥离更可靠。
-                await self._run_command(handler, "", event, name)
+                # ``_resolve_command`` 返回 ``(handler, args, name)``；历史上这里
+                # 写成 ``handler, name, _rest``，把参数串当成触发词传给了冷却，
+                # 于是发「转盘 3」把冷却键记成 "3"、发「签到」因参数为空直接绕过
+                # 冷却。参数不在这里剥离，统一交给 handler 用 ``_args()`` 处理
+                # （那边有完整的 COMMAND_NAMES 表，比按单个触发词剥离更可靠）。
+                handler, _args_text, _name = hit
+                await self._run_command(handler, "", event)
                 return
 
         # 关键词互动
@@ -945,24 +948,21 @@ class InteractionPlugin(Star):
             return
 
     async def _run_command(
-        self, handler: Any, args: str, event: AstrMessageEvent, command: str = ""
+        self, handler: Any, args: str, event: AstrMessageEvent
     ) -> None:
-        """执行免唤醒命中的指令，并统一处理前置检查与结果输出。
+        """执行免唤醒命中的指令，并统一处理结果输出。
 
         Args:
             handler: 指令处理协程。
             args: 指令之后的参数文本。
             event: 消息事件。
-            command: 命中的触发词，用于冷却隔离。
         """
-        reason = self._guard(event, command)
-        if reason is not None:
-            # 一律给出明确提示。历史上冷却命中是「静默丢弃」的，
-            # 用户看不到任何回执，只会以为插件坏了 —— 正是「不管发什么
-            # 都是操作太快/没反应」的观感来源。
-            event.stop_event()
-            await event.send(self._deny(reason))
-            return
+        # 注意：**不要**在这里再调一次 ``_guard``。每个 ``cmd_*`` handler 开头
+        # 已经有同样的检查，两条路径（免唤醒 / 标准指令）共用同一个 handler，
+        # 在这里重复一次会让冷却被连续消费两次：第一次放行、第二次立刻命中
+        # 「操作太快」。于是只要把 ``permission.cooldown_seconds`` 调大，免唤醒
+        # 路径下**所有**指令都会回「操作太快啦」。
+        # handler 自己返回的拒绝结果同样会走到下面的 ``event.send``，回执不丢。
         event.stop_event()
         try:
             result = await handler(event, args)
@@ -3418,7 +3418,9 @@ class InteractionPlugin(Star):
         times = max(1, min(times, max(1, self._int("wheel", "max_spins", default=10))))
         key = self._session_key(event)
         uid, name = self._sender(event)
-        cost = max(0, self._int("wheel", "cost", default=50))
+        # 消耗抬到安全下限：期望回报是固定值，配置成 0 或很小的值会把转盘
+        # 变成正期望的印钞机，这里兜住。
+        cost = games_plus.normalize_wheel_cost(self._int("wheel", "cost", default=50))
         cooldown = max(0, self._int("wheel", "cooldown_seconds", default=10))
         user = self.store.get_user(key, uid)
         user["name"] = name

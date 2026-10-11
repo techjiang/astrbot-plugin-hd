@@ -740,8 +740,25 @@ async def main() -> int:
         after = plugin.store.get_user("aiocqhttp_group_888", "1001")["balance"]
         assert after - before == 70, f"转盘净变动应为 +70，实际 {after - before}"
         assert "余额" in out
+
+        # 消耗配成 0 也必须被抬到安全下限，不能变成零成本印钞机
+        plugin.config["wheel"] = {
+            "enabled": True,
+            "cost": 0,
+            "cooldown_seconds": 0,
+            "max_spins": 10,
+        }
+        plugin.store.get_user("aiocqhttp_group_888", "1001")["last_wheel_ts"] = 0
+        floor = plugin_main.games_plus.wheel_cost_floor()
+        await run("转盘-零消耗兜底", "转盘", (f"消耗 {floor}",), handler="cmd_wheel")
     finally:
         plugin_main.games_plus.wheel_spin = _real_spin
+        plugin.config["wheel"] = {
+            "enabled": True,
+            "cost": 50,
+            "cooldown_seconds": 0,
+            "max_spins": 10,
+        }
 
     # 成就 / 加成 / 转生
     await run("成就", "成就", ("成就",), handler="cmd_achievements")
@@ -1165,6 +1182,27 @@ async def main() -> int:
     await run("冷却-同指令被拦", "签到", ("太快",), handler="cmd_sign")
     await run("冷却-异指令放行", "抽奖", (), handler="cmd_lottery")
     await run("冷却-查询类豁免", "积分", (), handler="cmd_balance")
+
+    # 免唤醒入口（on_message）在冷却开启时也必须能执行：
+    # 历史 bug 是 _run_command 与 handler 各调一次 _guard，冷却被消费两次，
+    # 于是冷却一开、免唤醒路径下所有指令都回「操作太快」。
+    async def wake_free(
+        label: str, text: str, must: tuple[str, ...] = (), uid: str = "1001"
+    ) -> str:
+        ev = make_event(text, uid=uid)
+        ev.is_at_or_wake_command = False  # 群里不 @机器人
+        await plugin.on_message(ev)
+        out = "\n".join(s.get_plain_text() for s in getattr(ev, "sent", []))
+        record(label, out, must)
+        return out
+
+    # 用白板小号，避免与上一段「冷却-首条放行」的签到时间戳相互污染
+    wf_uid = "7001"
+    plugin.store.add_balance("aiocqhttp_group_888", wf_uid, 500)
+    await wake_free("免唤醒-冷却首条放行", "签到", ("签到成功",), uid=wf_uid)
+    await wake_free("免唤醒-冷却同指令被拦", "签到", ("太快",), uid=wf_uid)
+    await wake_free("免唤醒-冷却异指令放行", "转盘", ("大转盘",), uid=wf_uid)
+    await wake_free("免唤醒-冷却按键隔离", "转盘 2", ("太快",), uid=wf_uid)
     plugin.config["permission"]["cooldown_seconds"] = 0
 
     # ---------- 5) 脏配置兜底 ----------
