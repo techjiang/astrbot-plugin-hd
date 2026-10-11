@@ -1306,18 +1306,53 @@ async def test_wheel_balance_never_negative(plugin, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_wheel_rebirth_bonus_only_on_profit(plugin, monkeypatch):
-    """转生加成只作用于净盈利，亏损时不得被放大。"""
+async def test_wheel_ignores_rebirth_bonus(plugin, monkeypatch):
+    """转盘是回收型玩法，不得吃转生加成 —— 否则期望会被翻正、变成印钞机。
+
+    奖池积分期望回报约 45.6（消耗 50，回收率 ≈ 0.91）。若把奖品乘上转生加成，
+    转生 2 次（×1.10）后期望就超过消耗，可以无限刷分。这里断言：
+    抽中 120（净 +70）在转生 2 次下仍是 +70，没有被 ×1.10 放大。
+    """
     key = "aiocqhttp_group_888"
     _prep_wheel(plugin, key=key, balance=500, rebirth=2)
 
     _force_wheel(plugin, monkeypatch, 120)
     out = await run(plugin, "cmd_wheel", make_event("转盘"))
-    user = plugin.store.get_user(key, "1001")
-    assert user["balance"] > 570  # 盈利被转生加成放大
-    assert "本次净变动 +" in out
+    assert "本次净变动 +70" in out
+    assert plugin.store.get_user(key, "1001")["balance"] == 570
 
+    user = plugin.store.get_user(key, "1001")
     user["last_wheel_ts"] = 0
     _force_wheel(plugin, monkeypatch, 10)
     out = await run(plugin, "cmd_wheel", make_event("转盘"))
     assert "本次净变动 -40" in out
+
+
+@pytest.mark.asyncio
+async def test_rpsls_wager_is_zero_sum_even_with_rebirth(plugin):
+    """决斗盘是零和对赌，转生加成不得让它变成正期望。
+
+    给赢的那一份乘加成，期望会变成 (加成-1)/3 × bet > 0，
+    转生后可以靠反复对赌刷分。锁住「赢一局净增恰等于赌注」。
+    """
+    from astrbot_plugin_hudong import games_plus
+
+    key = "aiocqhttp_group_888"
+    uid = "1001"
+    user = plugin.store.get_user(key, uid)
+    user["rebirth"] = 20  # 最高档 ×2.0
+    user["achievements"] = [code for code, *_ in games_plus.ACHIEVEMENTS]
+    plugin.store.add_balance(key, uid, 100000)
+    bet = 100
+    seen_win = False
+    for _ in range(300):
+        before = int(user["balance"])
+        await run(plugin, "cmd_rpsls", make_event(f"决斗盘 石头 {bet}", uid=uid))
+        after = int(plugin.store.get_user(key, uid)["balance"])
+        delta = after - before
+        if delta > 0:  # 赢
+            seen_win = True
+            assert delta == bet, f"赢一局净增 {delta}，应为赌注 {bet}（加成未生效）"
+        else:  # 输或平
+            assert delta >= -bet
+    assert seen_win, "300 局一次都没赢，种子或逻辑有问题"

@@ -3382,11 +3382,13 @@ class InteractionPlugin(Star):
                 user["balance"] = max(0, int(user["balance"]) - fee)
                 text += f"（平局手续费 {fee} {self._unit}）"
         elif verdict == "a":
-            gain = games_plus.apply_bonus(bet, int(user.get("rebirth", 0) or 0))
-            user["balance"] = int(user["balance"]) + gain
+            # 决斗盘是**零和**对赌：赢拿 +bet、输扣 -bet，三方等概率。
+            # 若给赢的那一份乘上转生加成，期望就会变成 (加成-1)/3 × bet > 0，
+            # 转生后可以靠反复对赌无限刷分 —— 故这里不加成，与抛硬币保持一致。
+            user["balance"] = int(user["balance"]) + bet
             text = f"🎉 你出 {mine}，我出 {foe} —— {games_plus.rpsls_flavor(mine, foe)}，你赢了！"
             if bet:
-                text += f"（+{gain} {self._unit}）"
+                text += f"（+{bet} {self._unit}）"
         else:
             user["balance"] = max(0, int(user["balance"]) - bet)
             text = f"😵 你出 {mine}，我出 {foe} —— {games_plus.rpsls_flavor(foe, mine)}，你输了。"
@@ -3433,7 +3435,7 @@ class InteractionPlugin(Star):
                 f"你只有 {user['balance']}。"
             )
         lines = [f"🎡 @{name} 大转盘 {times} 连抽（消耗 {total_cost} {self._unit}）"]
-        # ``wheel_spin`` 返回的 delta 已经扣掉了本次消耗，累加即为真实净变动。
+        # ``wheel_spin`` 返回的 delta 已扣掉本次消耗，累加即为真实净变动。
         net = 0
         for _ in range(times):
             kind, delta, label = games_plus.wheel_spin(cost, self._rng)
@@ -3444,11 +3446,10 @@ class InteractionPlugin(Star):
                 if label not in titles:
                     titles.append(label)
                     user["title"] = label
-        # 只有净盈利部分享受转生加成；亏损照实结算，余额兜底不为负。
-        change = games_plus.apply_bonus(net, int(user.get("rebirth", 0) or 0))
-        if net <= 0:
-            change = net
-        user["balance"] = max(0, int(user["balance"]) + change)
+        # 转盘是**回收型玩法**：奖池期望本就低于消耗（回收率 ≈ 91%）。
+        # 转生加成会把这个期望按倍率放大，转生 2 次（×1.10）后期望即翻正，
+        # 变成「转得越多、赚得越多」的印钞机 —— 故转盘不享受转生加成。
+        user["balance"] = max(0, int(user["balance"]) + net)
         user["wheel_count"] = int(user.get("wheel_count", 0) or 0) + times
         user["last_wheel_ts"] = now
         games.bump_daily(user, "wheel")
@@ -3456,7 +3457,7 @@ class InteractionPlugin(Star):
         await self.store.save(key, force=True)
         return event.plain_result(
             "\n".join(lines)
-            + f"\n本次净变动 {change:+d}，余额 {user['balance']} {self._unit}。{tail}"
+            + f"\n本次净变动 {net:+d}，余额 {user['balance']} {self._unit}。{tail}"
         )
 
     # ------------------------------------------------------------------ 第二批扩展：成长类
