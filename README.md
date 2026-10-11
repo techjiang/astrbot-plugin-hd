@@ -8,7 +8,7 @@
 
 让群聊真正热闹起来的一站式玩法合集
 
-[![version](https://img.shields.io/badge/version-v1.4.0-4f7cff)](./metadata.yaml)
+[![version](https://img.shields.io/badge/version-v1.4.1-4f7cff)](./metadata.yaml)
 [![astrbot](https://img.shields.io/badge/AstrBot-%3E%3D4.10%2C%20%3C5-22c55e)](https://astrbot.app)
 [![python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)](./pyproject.toml)
 [![deps](https://img.shields.io/badge/第三方依赖-0-ff9800)](./requirements.txt)
@@ -39,7 +39,7 @@
 - **可检索的标签体系** —— 22 项成就带分类与稀有度，支持关键词 / 分类 / 稀有度筛选
 - **长线玩法** —— 赛季按月重置、群 Boss 战全群协作、宠物养成给每日一个理由回来
 - **冷却不误伤** —— 限流按「会话 + 用户 + 指令」隔离，不同指令互不影响，查询类指令始终豁免
-- **564 项单测 + 217 项真实框架冒烟** —— 每次改动都会跑，含免唤醒与零和守恒回归
+- **570 项单测 + 218 项真实框架冒烟** —— 每次改动都会跑，含免唤醒与零和守恒回归
 
 ## 环境要求
 
@@ -287,7 +287,7 @@ pip install ruff pytest pytest-asyncio
 
 ruff format . && ruff check .      # 代码风格
 python -m pytest tests -q          # 510 项单元/集成测试
-python tools/e2e_smoke.py          # 真实 AstrBot 框架下的 165 项端到端冒烟测试
+python tools/e2e_smoke.py          # 真实 AstrBot 框架下的 218 项端到端冒烟测试
 python tools/build_logo.py assets/design-source.png assets   # 重新生成 logo 资源
 ```
 

@@ -1225,3 +1225,99 @@ async def test_bonus_shows_new_sections(plugin):
     assert "标签" in out
     assert "赛季" in out
     assert "宠物" in out
+
+
+# ------------------------------------------------------- 回归：大转盘账目守恒
+
+
+def _prep_wheel(plugin, key="aiocqhttp_group_888", uid="1001", balance=500, rebirth=0):
+    """准备一个干净用户，并关掉成就，避免成就奖励干扰账目断言。"""
+    plugin.config["wheel"] = {"enabled": True, "cost": 50, "max_spins": 10}
+    plugin.config["achievements"]["enabled"] = False
+    user = plugin.store.get_user(key, uid)
+    user["balance"] = int(balance)
+    user["rebirth"] = int(rebirth)
+    return user
+
+
+def _force_wheel(plugin, monkeypatch, prize: int):
+    """把转盘固定成某一奖值，便于精确断言「奖值 - 消耗 == 余额净变动」。"""
+
+    def fake_spin(cost, rng=None):
+        return "amount", int(prize) - int(cost), f"固定 {prize}"
+
+    monkeypatch.setattr(plugin_main.games_plus, "wheel_spin", fake_spin)
+    return prize
+
+
+@pytest.mark.asyncio
+async def test_wheel_win_credits_full_prize(plugin, monkeypatch):
+    """回归：花费 50 抽中 120，净变动必须是 +70，而不是 +20。"""
+    key = "aiocqhttp_group_888"
+    _prep_wheel(plugin, key=key)
+    _force_wheel(plugin, monkeypatch, 120)
+    out = await run(plugin, "cmd_wheel", make_event("转盘"))
+    assert "本次净变动 +70" in out
+    assert plugin.store.get_user(key, "1001")["balance"] == 570
+
+
+@pytest.mark.asyncio
+async def test_wheel_prize_equal_to_cost_is_break_even(plugin, monkeypatch):
+    """花费 50 抽中 50，净变动应为 0（既不是 -50 也不是 +50）。"""
+    key = "aiocqhttp_group_888"
+    _prep_wheel(plugin, key=key)
+    _force_wheel(plugin, monkeypatch, 50)
+    out = await run(plugin, "cmd_wheel", make_event("转盘"))
+    assert "本次净变动 +0" in out
+    assert plugin.store.get_user(key, "1001")["balance"] == 500
+
+
+@pytest.mark.asyncio
+async def test_wheel_loss_only_deducts_cost(plugin, monkeypatch):
+    key = "aiocqhttp_group_888"
+    _prep_wheel(plugin, key=key)
+    _force_wheel(plugin, monkeypatch, 10)
+    out = await run(plugin, "cmd_wheel", make_event("转盘"))
+    assert "本次净变动 -40" in out
+    assert plugin.store.get_user(key, "1001")["balance"] == 460
+
+
+@pytest.mark.asyncio
+async def test_wheel_multi_spin_accounting(plugin, monkeypatch):
+    """连抽账目必须与逐次转动之和一致。"""
+    key = "aiocqhttp_group_888"
+    _prep_wheel(plugin, key=key)
+    _force_wheel(plugin, monkeypatch, 120)
+    out = await run(plugin, "cmd_wheel", make_event("转盘"), args="3")
+    assert "3 连抽（消耗 150" in out
+    assert "本次净变动 +210" in out
+    assert plugin.store.get_user(key, "1001")["balance"] == 710
+
+
+@pytest.mark.asyncio
+async def test_wheel_balance_never_negative(plugin, monkeypatch):
+    """最坏情况下（全空），余额扣到 0 也不能变负。"""
+    key = "aiocqhttp_group_888"
+    _prep_wheel(plugin, key=key, balance=50)
+    _force_wheel(plugin, monkeypatch, 0)
+    out = await run(plugin, "cmd_wheel", make_event("转盘"))
+    assert "本次净变动 -50" in out
+    assert plugin.store.get_user(key, "1001")["balance"] == 0
+
+
+@pytest.mark.asyncio
+async def test_wheel_rebirth_bonus_only_on_profit(plugin, monkeypatch):
+    """转生加成只作用于净盈利，亏损时不得被放大。"""
+    key = "aiocqhttp_group_888"
+    _prep_wheel(plugin, key=key, balance=500, rebirth=2)
+
+    _force_wheel(plugin, monkeypatch, 120)
+    out = await run(plugin, "cmd_wheel", make_event("转盘"))
+    user = plugin.store.get_user(key, "1001")
+    assert user["balance"] > 570  # 盈利被转生加成放大
+    assert "本次净变动 +" in out
+
+    user["last_wheel_ts"] = 0
+    _force_wheel(plugin, monkeypatch, 10)
+    out = await run(plugin, "cmd_wheel", make_event("转盘"))
+    assert "本次净变动 -40" in out

@@ -3432,21 +3432,23 @@ class InteractionPlugin(Star):
                 f"余额不足，{times} 连抽需要 {total_cost} {self._unit}，"
                 f"你只有 {user['balance']}。"
             )
-        user["balance"] = int(user["balance"]) - total_cost
         lines = [f"🎡 @{name} 大转盘 {times} 连抽（消耗 {total_cost} {self._unit}）"]
-        net = -total_cost
+        # ``wheel_spin`` 返回的 delta 已经扣掉了本次消耗，累加即为真实净变动。
+        net = 0
         for _ in range(times):
             kind, delta, label = games_plus.wheel_spin(cost, self._rng)
-            net += delta + cost
+            net += delta
             lines.append(f"· {label}")
             if kind == "item":
                 titles = user.setdefault("titles", [])
                 if label not in titles:
                     titles.append(label)
                     user["title"] = label
-        bonus = games_plus.apply_bonus(max(0, net), int(user.get("rebirth", 0) or 0))
-        gained = bonus if net > 0 else max(0, net)
-        user["balance"] = int(user["balance"]) + gained
+        # 只有净盈利部分享受转生加成；亏损照实结算，余额兜底不为负。
+        change = games_plus.apply_bonus(net, int(user.get("rebirth", 0) or 0))
+        if net <= 0:
+            change = net
+        user["balance"] = max(0, int(user["balance"]) + change)
         user["wheel_count"] = int(user.get("wheel_count", 0) or 0) + times
         user["last_wheel_ts"] = now
         games.bump_daily(user, "wheel")
@@ -3454,7 +3456,7 @@ class InteractionPlugin(Star):
         await self.store.save(key, force=True)
         return event.plain_result(
             "\n".join(lines)
-            + f"\n本次净变动 {gained - total_cost:+d}，余额 {user['balance']} {self._unit}。{tail}"
+            + f"\n本次净变动 {change:+d}，余额 {user['balance']} {self._unit}。{tail}"
         )
 
     # ------------------------------------------------------------------ 第二批扩展：成长类

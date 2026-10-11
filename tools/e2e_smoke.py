@@ -724,6 +724,25 @@ async def main() -> int:
     await run("转盘", "转盘", ("大转盘", "余额"), handler="cmd_wheel")
     await run("转盘-连抽", "转盘 3", ("3 连抽",), handler="cmd_wheel")
 
+    # 大转盘账目守恒：把扇区固定住，核对「净变动 == 奖值 - 消耗」。
+    # 回归线上 bug：消耗被扣了两次，抽中 120 只到账 +20。
+    _real_spin = plugin_main.games_plus.wheel_spin
+    try:
+        plugin_main.games_plus.wheel_spin = lambda cost, rng=None: (
+            "amount",
+            120 - int(cost),
+            "固定 120",
+        )
+        before = plugin.store.get_user("aiocqhttp_group_888", "1001")["balance"]
+        out = await run(
+            "转盘-账目守恒", "转盘", ("本次净变动 +70",), handler="cmd_wheel"
+        )
+        after = plugin.store.get_user("aiocqhttp_group_888", "1001")["balance"]
+        assert after - before == 70, f"转盘净变动应为 +70，实际 {after - before}"
+        assert "余额" in out
+    finally:
+        plugin_main.games_plus.wheel_spin = _real_spin
+
     # 成就 / 加成 / 转生
     await run("成就", "成就", ("成就",), handler="cmd_achievements")
     await run("我的加成", "我的加成", ("收益加成", "今日折扣"), handler="cmd_bonus")
