@@ -37,7 +37,7 @@ def bootstrap() -> None:
 
 
 from astrbot.api.event import AstrMessageEvent
-from astrbot.core.message.components import Plain
+from astrbot.core.message.components import At, Plain
 from astrbot.core.message.message_event_result import MessageEventResult
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
@@ -102,7 +102,7 @@ CONFIG = {
     "wager": {
         "enabled": True,
         "duration_seconds": 180,
-        "max_options": 5,
+        "max_options": 100,
         "max_bet": 1000,
     },
     "tictactoe": {"enabled": True, "reward": 15, "punish": 0},
@@ -168,6 +168,36 @@ def make_event(text: str, uid: str = "1001", gid: str = "888", admin: bool = Fal
     ev.is_wake = True
     ev.role = "admin" if admin else "member"
     ev.message_str = ev.message_str[1:].strip()
+    return ev
+
+
+def make_chain_event(
+    chain: list,
+    uid: str = "1001",
+    gid: str = "888",
+) -> _Event:
+    """构造一条带真实消息链（含 ``At`` 组件）的事件。
+
+    ``make_event`` 只塞了 ``Plain``，而线上「@某人 转账 5」是
+    ``At + Plain``：``message_str`` 里只有昵称，数字只存在于 ``At.qq``。
+    这是历史漏洞的根源，必须在冒烟测试里用真实消息链覆盖。
+    """
+    msg = AstrBotMessage()
+    msg.message = list(chain)
+    msg.message_str = "".join(c.text for c in chain if isinstance(c, Plain))
+    msg.sender = MessageMember(user_id=uid, nickname=f"用户{uid}")
+    msg.self_id = "999"
+    msg.group_id = gid
+    msg.type = MessageType.GROUP_MESSAGE
+    msg.session_id = gid
+    ev = _Event(
+        msg.message_str,
+        msg,
+        PlatformMetadata(name="aiocqhttp", id="aiocqhttp", description=""),
+        gid,
+    )
+    ev.is_at_or_wake_command = True
+    ev.is_wake = True
     return ev
 
 
@@ -1169,6 +1199,51 @@ async def main() -> int:
         ("战队-未知操作", "战队 乱写", "cmd_squad", "8501"),
     ):
         await run(label, text, (), handler=handler, uid=uid)
+
+    # ---------- 3.5) 真实 @ 链路（用户报的现象） ----------
+    print("\n[真实消息链] @某人 转账 / 打劫 / 赠送 / PK")
+    await run("准备-1002签到", "签到", (), handler="cmd_sign", uid="1002")
+    await run("准备-1001签到", "签到", (), handler="cmd_sign", uid="1001")
+    at_cases = [
+        ("@转账", "转账 1", "cmd_transfer", ("已转给",), ("1002", "李子")),
+        ("@打劫", "打劫 1", "cmd_rob", ("打劫",), ("1002", "李子")),
+        ("@赠送", "赠送 奶茶", "cmd_gift", ("送出了",), ("1002", "李子")),
+        ("@PK", "pk 10", "cmd_duel", ("⚔️",), ("1002", "李子")),
+        ("@背包", "背包", "cmd_bag", ("背包",), ("1002", "李子")),
+    ]
+    for label, text, handler, must, mention in at_cases:
+        ev = make_chain_event(
+            [
+                At(qq="999", name="诺里"),
+                At(qq=mention[0], name=mention[1]),
+                Plain(f" {text}"),
+            ]
+        )
+        out = await h.call(handler, ev, args=plugin._args(ev))
+        record(label, out, must)
+
+    # ---------- 3.6) 数字竞猜 / 猜数字 免前缀 ----------
+    print("\n[免唤醒] 数字竞猜 与 猜 N")
+    ev_w = make_chain_event([At(qq="999", name="诺里"), Plain(" 数字竞猜")])
+    out = await h.call("cmd_wager", ev_w, args=plugin._wager_raw_text(ev_w, ""))
+    record("数字竞猜开盘", out, ("竞猜开盘", "100:100"))
+    assert "aiocqhttp_group_888" in plugin._wagers, "数字竞猜没有开盘"
+    ev_b = make_chain_event([Plain("下注 1 10")], uid="1002")
+    out = await h.call("cmd_bet", ev_b, args=plugin._args(ev_b))
+    record("数字竞猜下注", out, ("下注",))
+    ev_d = make_chain_event([Plain("开奖 1")])
+    out = await h.call("cmd_draw", ev_d, args=plugin._args(ev_d))
+    record("数字竞猜开奖", out, ())
+    plugin._wagers.pop("aiocqhttp_group_888", None)
+
+    ev_g = make_chain_event([Plain("猜数字")])
+    await h.call("cmd_guess_start", ev_g, args="")
+    ttl = plugin._guesses["aiocqhttp_group_888"]
+    ev_g2 = make_chain_event([Plain(f"猜 {ttl.target}")])
+    handled = await plugin._auto_game(
+        ev_g2, f"猜 {ttl.target}".split()[0] + " " + str(ttl.target)
+    )
+    assert handled, "「猜 N」未被进行中的对局接管"
 
     # ---------- 4) 守卫 ----------
     plugin.config["enabled"] = False

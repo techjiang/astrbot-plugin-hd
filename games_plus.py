@@ -64,6 +64,14 @@ def _normalize_option(text: str) -> str:
 WAGER_MIN_ODDS = 1.05
 WAGER_MAX_ODDS = 20.0
 
+# 单盘竞猜的选项上限。定在 100，是为了让「数字竞猜」能直接开 1~100 的盘；
+# 历史上这里写死 8，导致按数字开盘会被静默截断成 8 个选项。
+WAGER_MAX_OPTIONS = 100
+
+# 「数字竞猜」的选项：1~100 的每个数字。
+# 放在这里而不是 main.py，是为了让「选项数上限」能被下注逻辑与测试直接引用。
+WAGER_NUMBER_OPTIONS: tuple[str, ...] = tuple(str(n) for n in range(1, 101))
+
 
 def wager_payout(
     bet: int,
@@ -109,6 +117,26 @@ def wager_payout(
     share = bet * losers_pool // winner_pool
     total = bet + share
     return total, share
+
+
+def render_options(options: list[str], per_line: int = 10) -> list[str]:
+    """把选项渲染成紧凑的号码表，选项多时自动换行。
+
+    100 个选项一条消息刷屏很难看，也不方便数序号；按每行 ``per_line``
+    个折行后，玩家一眼就能定位到「27 号」。
+
+    Args:
+        options: 选项列表。
+        per_line: 每行放几个。
+
+    Returns:
+        渲染后的行列表。
+    """
+    per_line = max(1, int(per_line))
+    tokens = [f"{i}:{opt}" for i, opt in enumerate(options, 1)]
+    return [
+        "  ".join(tokens[i : i + per_line]) for i in range(0, len(tokens), per_line)
+    ]
 
 
 def wager_odds(option_pool: dict[str, int], options: list[str]) -> dict[str, float]:
@@ -184,14 +212,14 @@ class WagerGame:
 
         Args:
             question: 题目。
-            options: 选项（至少 2 个，超出会被截断到 8 个）。
+            options: 选项（至少 2 个，超出会被截断到 ``WAGER_MAX_OPTIONS`` 个）。
             owner: 发起人。
             duration: 时长（秒），收敛到 30 ~ 3600。
 
         Returns:
             初始化后的竞猜。
         """
-        opts = [str(o).strip() for o in options if str(o).strip()][:8]
+        opts = [str(o).strip() for o in options if str(o).strip()][:WAGER_MAX_OPTIONS]
         return cls(
             question=str(question).strip(),
             options=opts,

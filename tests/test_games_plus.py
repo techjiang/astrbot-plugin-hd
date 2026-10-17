@@ -143,8 +143,14 @@ class TestWagerOdds:
 class TestWagerGame:
     def test_new_clamps_options_and_duration(self):
         game = gp.WagerGame.new("q", [f"o{i}" for i in range(20)], "u", 99999)
-        assert len(game.options) == 8
+        assert len(game.options) == 20
         assert game.duration == 3600
+
+    def test_new_clamps_options_to_wager_max(self):
+        """选项上限是 ``WAGER_MAX_OPTIONS``（100），用于数字竞猜的 1~100 盘。"""
+        many = [f"o{i}" for i in range(gp.WAGER_MAX_OPTIONS + 20)]
+        game = gp.WagerGame.new("q", many, "u")
+        assert len(game.options) == gp.WAGER_MAX_OPTIONS
 
     def test_new_ignores_blank_options(self):
         game = gp.WagerGame.new("q", ["A", " ", "", "B"], "u")

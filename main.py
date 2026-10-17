@@ -29,6 +29,7 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star
+from astrbot.core.message.components import At
 
 from . import games, games_arena, games_extra, games_plus, games_tags, games_world
 from .games import ChainGame, GuessGame
@@ -38,6 +39,23 @@ from .store import InteractionStore
 # 重要：AstrBot 在唤醒阶段只剥掉 wake_prefix，**不会**剥掉指令名本身，
 # 因此 ``event.message_str`` 里始终带着指令名，必须按此表剥离前缀。
 # 新增带参数指令时，务必把指令名与别名都加进来。
+# 竞猜类触发词。这些词的「后面」才是参数，需要整词剥离而不是按 COMMAND_NAMES
+# 逐字剥 —— 「数字竞猜」既是触发词又是玩法关键词，剥多了就没参数了。
+# ``_resolve_target`` 的哨兵返回值：用户显式把「自己」当成了目标。
+# 与空串（没解析出目标）区分开，才能给出准确提示。
+_SELF_TARGET = "__self__"
+
+_WAGER_COMMANDS: tuple[str, ...] = (
+    "数字竞猜",
+    "猜数字竞猜",
+    "猜大小",
+    "比大小",
+    "竞猜",
+    "预测",
+    "开盘",
+    "wager",
+)
+
 COMMAND_NAMES: tuple[str, ...] = (
     "互动状态",
     "互动帮助",
@@ -251,6 +269,10 @@ COMMAND_NAMES: tuple[str, ...] = (
     "竞猜",
     "预测",
     "开盘",
+    "数字竞猜",
+    "猜数字竞猜",
+    "猜大小",
+    "比大小",
     "下注",
     "押注",
     "投注",
@@ -556,6 +578,126 @@ class InteractionPlugin(Star):
         name = (event.get_sender_name() or "").strip() or uid
         return uid, name
 
+    def _mentions(self, event: AstrMessageEvent) -> list[str]:
+        """取出本条消息里被 @ 的用户 ID（按出现顺序）。
+
+        必须读消息链而不是 ``message_str``：适配器在转纯文本时，``@某人``
+        要么变成 ``@昵称``、要么变成 ``@昵称 1234``，也可能是纯昵称。
+        按昵称猜用户 ID 必然出错，所以这里只认消息链里的 ``At`` 组件。
+
+        Args:
+            event: 消息事件。
+
+        Returns:
+            被 @ 的用户 ID 列表；「@全体成员」会被排除。
+        """
+        try:
+            chain = event.get_messages()
+        except Exception:  # noqa: BLE001 - 取消息链失败时退化为「没有 @」
+            return []
+        ids: list[str] = []
+        for comp in chain or []:
+            if not isinstance(comp, At):
+                continue
+            uid = str(getattr(comp, "qq", "") or "").strip()
+            if uid and uid != "all" and uid not in ids:
+                ids.append(uid)
+        return ids
+
+    def _resolve_target(self, event: AstrMessageEvent, raw: str) -> tuple[str, str]:
+        """解析「目标用户 + 剩余参数」。
+
+        支持两种写法：
+        - ``@某人 5``：目标从消息链的 ``At`` 组件取，参数是剩下的 ``5``；
+        - ``10001 5``：目标是被 @ 者之外的第一个纯数字。
+
+        历史实现只从 ``message_str`` 里抠数字，遇到 ``@某人`` 时拿到的
+        是昵称或空串，于是「转账 @某人 1」永远回退成用法提示。
+
+        Args:
+            event: 消息事件。
+            raw: 指令之后的参数文本。
+
+        Returns:
+            ``(目标 ID, 剩余参数文本)``，解析失败时目标为空串。
+        """
+        text = (raw or "").strip()
+        sender = str(event.get_sender_id())
+
+        # 1) 优先用 @ 到的第一个人：排除机器人自己与发送者自己
+        #    （「@机器人 转账 @甲 5」里第一个 At 是机器人，不是收款人）
+        for uid in self._mentions(event):
+            if uid != sender and not self._is_bot(event, uid):
+                return uid, self._strip_mention_text(text, uid)
+
+        # 2) 没有（有效）@：取第一个纯数字 token —— 「转账 10001 50」的老写法
+        tokens = text.split()
+        for i, token in enumerate(tokens):
+            bare = token.strip().lstrip("@")
+            if not bare.isdigit():
+                continue
+            rid = self._resolve_uid(token)
+            if not rid or self._is_bot(event, rid):
+                continue
+            if rid == sender:
+                # 显式写了「自己」：明确告知，而不是把金额当目标继续执行
+                return _SELF_TARGET, " ".join(tokens[:i] + tokens[i + 1 :]).strip()
+            return rid, " ".join(tokens[:i] + tokens[i + 1 :]).strip()
+        return "", text
+
+    def _target_or_self(self, event: AstrMessageEvent, raw: str) -> str:
+        """解析「查看谁」的目标：优先 @ 或显式 ID，否则是自己。
+
+        Args:
+            event: 消息事件。
+            raw: 指令之后的参数文本。
+
+        Returns:
+            目标用户 ID。
+        """
+        target, _rest = self._resolve_target(event, raw)
+        if target == _SELF_TARGET:
+            return str(event.get_sender_id())
+        return target or str(event.get_sender_id())
+
+    def _is_bot(self, event: AstrMessageEvent, uid: str) -> bool:
+        """判断某个 ID 是不是机器人自己。
+
+        「@机器人 转账 @甲 5」里第一个 ``At`` 是机器人，不能当成转账目标。
+        除了 ``self_id``，再兜一层：与发送者 ID 相同的「@自己」也算无效目标。
+
+        Args:
+            event: 消息事件。
+            uid: 待判断的用户 ID。
+
+        Returns:
+            是否为机器人。
+        """
+        self_id = str(getattr(event, "get_self_id", lambda: "")() or "")
+        return bool(self_id) and str(uid) == self_id
+
+    @staticmethod
+    def _strip_mention_text(text: str, uid: str) -> str:
+        """把参数文本里的 @ 占位文本去掉，只留数字参数。
+
+        Args:
+            text: 指令之后的参数文本。
+            uid: 已解析出的目标用户 ID。
+
+        Returns:
+            去掉目标后剩余的文本。
+        """
+        tokens = text.split()
+        kept: list[str] = []
+        for token in tokens:
+            bare = token.strip().lstrip("@")
+            if bare == uid or token.strip() == f"@{uid}":
+                continue
+            if bare and uid in bare and bare.replace(uid, "").strip() == "":
+                continue
+            kept.append(token)
+        return " ".join(kept).strip()
+
     @staticmethod
     def _resolve_uid(raw: str) -> str:
         """把「@某人」/``[At:123]``/``123`` 等写法解析成纯用户 ID。
@@ -724,6 +866,67 @@ class InteractionPlugin(Star):
         f = min(max(2, f), 1000)
         return c, f, note
 
+    @classmethod
+    def _wager_raw_text(cls, event: AstrMessageEvent, args: str) -> str:
+        """取竞猜的原始参数，并剥掉「竞猜」类触发词。
+
+        这里不能用通用的 :meth:`_args`：它按 ``COMMAND_NAMES`` 剥离，
+        而「数字竞猜」本身就是一个触发词，剥完只剩空串，玩法关键词
+        反而丢了（表现为「数字竞猜」只回一句用法提示）。
+
+        Args:
+            event: 消息事件。
+            args: 框架解析出的参数（为空时回退到消息文本）。
+
+        Returns:
+            触发词之后的文本。
+        """
+        for text in ((args or "").strip(), cls._normalize(event.message_str or "")):
+            if not text:
+                continue
+            for name in _WAGER_COMMANDS:
+                if text == name:
+                    # 触发词本身就是玩法关键词（如「数字竞猜」），原样返回
+                    return name
+                if text.startswith(name) and text[len(name)] in " \t\u3000|":
+                    return text[len(name) :].strip(" |") or name
+            return text
+        return ""
+
+    @staticmethod
+    def _parse_wager_args(raw: str) -> tuple[str, list[str] | None]:
+        """解析竞猜参数：显式选项 或 玩法关键词 二选一。
+
+        三种写法：
+
+        - ``晚饭吃啥 | 火锅 | 烧烤`` —— 显式选项（至少 2 个）；
+        - ``数字竞猜`` / ``比大小`` —— 生成 115 个数字选项，猜大小盘；
+        - 其它任意一句话（``今晚会不会下雨``）—— 按是非题给出「是 / 否」；
+        - 空参数 —— 返回用法提示。
+
+        Args:
+            raw: 指令之后的参数文本。
+
+        Returns:
+            ``(题目, 选项列表)``；选项为 ``None`` 表示参数不合法。
+        """
+        text = (raw or "").strip()
+        if not text:
+            return "", None
+        if "|" in text:
+            parts = [p.strip() for p in text.split("|") if p.strip()]
+            if len(parts) < 3:
+                return "", None
+            return parts[0], parts[1:]
+
+        compact = text.replace(" ", "")
+        if compact in ("数字竞猜", "猜数字竞猜", "比大小", "猜大小", "数字", "大小"):
+            return (
+                "我想的数字是几？（1~100，序号即数字）",
+                list(games_plus.WAGER_NUMBER_OPTIONS),
+            )
+        return text, ["是", "否"]
+
     def _guess_reward(self) -> int:
         """猜数字奖励：随难度自动缩放，避免「范围开到 100 万仍送 30」的失衡。"""
         lo = self._int("guess_number", "min", default=1)
@@ -796,7 +999,18 @@ class InteractionPlugin(Star):
         reg(self.cmd_duel, "pk", "PK", "对决", "决斗", "duel")
 
         # 第二批扩展：对局类
-        reg(self.cmd_wager, "竞猜", "预测", "开盘", "wager")
+        # 「数字竞猜」「猜数字竞猜」是最常被念的写法，必须能直接命中
+        reg(
+            self.cmd_wager,
+            "竞猜",
+            "预测",
+            "开盘",
+            "wager",
+            "数字竞猜",
+            "猜数字竞猜",
+            "比大小",
+            "猜大小",
+        )
         reg(self.cmd_bet, "下注", "押注", "投注", "bet")
         reg(self.cmd_draw, "开奖", "结算", "draw")
         reg(self.cmd_tictactoe, "井字棋", "三连", "tictactoe", "ttt")
@@ -995,6 +1209,26 @@ class InteractionPlugin(Star):
         #
         # 不这么排的话，一个 4 位数字会先被「扫雷」抢走，然后被判成
         # 「格号超范围」而回一句令人困惑的报错。
+        # 「猜 <数字>」是猜数字游戏的标准入口：必须在裸数字分支之前拦下，
+        # 否则归一化后的「猜 50」既不是纯数字、也不再命中「猜数字」，
+        # 消息会一路掉到最末尾被静默丢弃 —— 用户看到的就是「没反应」。
+        if text.startswith("猜"):
+            head = text[1:].lstrip("：: ").strip()
+            if head.isdigit():
+                result = await self._guess_once(event, int(head))
+                if result is not None:
+                    event.stop_event()
+                    await event.send(result)
+                    return True
+                if key not in self._guesses:
+                    event.stop_event()
+                    await event.send(
+                        event.plain_result(
+                            "当前没有进行中的猜数字，发送「猜数字」开始一局吧。"
+                        )
+                    )
+                    return True
+
         if text.isdigit():
             code_game = self._codes.get(key)
             if code_game is not None and len(text) == code_game.digits:
@@ -1274,17 +1508,17 @@ class InteractionPlugin(Star):
         """
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
-        parts = (args.strip() or self._args(event).strip()).split()
-        if len(parts) < 2:
-            return event.plain_result("用法：转账 @某人 数量，例如：转账 10001 50")
-        key = self._session_key(event)
-        uid, _ = self._sender(event)
-        target = self._resolve_uid(parts[0])
+        raw = args.strip() or self._args(event).strip()
+        target, rest = self._resolve_target(event, raw)
+        amount = games.parse_amount(rest.split()[0] if rest else "", default=-1)
+        if target == _SELF_TARGET:
+            return event.plain_result("不能给自己转账哦。")
         if not target:
-            return event.plain_result("没有识别到收款人，请用 @某人 或直接写用户 ID。")
-        amount = games.parse_amount(parts[1], default=-1)
+            return event.plain_result("用法：转账 @某人 数量，例如：转账 10001 50")
         if amount <= 0:
             return event.plain_result("转账数量必须是不小于 1 的整数。")
+        key = self._session_key(event)
+        uid, _ = self._sender(event)
         ok, msg = self.store.transfer(key, uid, target, amount)
         if not ok:
             return event.plain_result(msg)
@@ -1676,17 +1910,17 @@ class InteractionPlugin(Star):
             return self._deny(reason)
         if not self._feature_on("rob", default=False):
             return self._deny("打劫功能已关闭。")
-        parts = (args.strip() or self._args(event).strip()).split()
-        if len(parts) < 2:
-            return event.plain_result("用法：打劫 @某人 数量，例如：打劫 10001 50")
+        raw = args.strip() or self._args(event).strip()
+        target, rest = self._resolve_target(event, raw)
+        amount = games.parse_amount(rest.split()[0] if rest else "", default=0)
         key = self._session_key(event)
         uid, name = self._sender(event)
-        target = self._resolve_uid(parts[0])
+        if target == _SELF_TARGET:
+            return event.plain_result("不能打劫自己哦。")
         if not target:
-            return event.plain_result("没有识别到目标，请用 @某人 或直接写用户 ID。")
+            return event.plain_result("用法：打劫 @某人 数量，例如：打劫 10001 50")
         if target == uid:
             return event.plain_result("不能打劫自己哦。")
-        amount = games.parse_amount(parts[1], default=0)
         if amount <= 0:
             return event.plain_result("打劫数量必须是不小于 1 的整数。")
         victim = self.store.peek_user(key, target)
@@ -2600,9 +2834,7 @@ class InteractionPlugin(Star):
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
-        target = self._resolve_uid(args.strip() or self._args(event)) or str(
-            event.get_sender_id()
-        )
+        target = self._target_or_self(event, args.strip() or self._args(event))
         user = self.store.get_user(key, target)
         name = self.store.display_name(key, target)
         bag = user.get("bag") or {}
@@ -2662,23 +2894,26 @@ class InteractionPlugin(Star):
             return self._deny(reason)
         if not self._feature_on("social"):
             return self._deny("社交玩法已关闭。")
-        parts = (args.strip() or self._args(event).strip()).split()
-        if len(parts) < 2:
+        raw = args.strip() or self._args(event).strip()
+        target, rest = self._resolve_target(event, raw)
+        parts = rest.split()
+        if target == _SELF_TARGET:
+            return event.plain_result("请 @ 一位群友（不能送给自己）。")
+        if not target or not parts:
             return event.plain_result(
                 "用法：赠送 @某人 礼物，可送：" + "、".join(games_extra.GIFT_ITEMS)
             )
         key = self._session_key(event)
         uid, name = self._sender(event)
-        target = self._resolve_uid(parts[0])
-        if not target or target == uid:
+        if target == uid:
             return event.plain_result("请 @ 一位群友（不能送给自己）。")
-        gift = parts[1]
+        gift = parts[0]
         if gift not in games_extra.GIFT_ITEMS:
             return event.plain_result(
                 "没有这种礼物哦，可送：" + "、".join(games_extra.GIFT_ITEMS)
             )
         count = max(
-            1, min(99, games.parse_amount(parts[2], 1) if len(parts) > 2 else 1)
+            1, min(99, games.parse_amount(parts[1], 1) if len(parts) > 1 else 1)
         )
         emoji, price, base = games_extra.GIFT_ITEMS[gift]
         total = price * count
@@ -2721,7 +2956,7 @@ class InteractionPlugin(Star):
         uid, _name = self._sender(event)
         user = self.store.get_user(key, uid)
         bucket = user.get("intimacy") or {}
-        target = self._resolve_uid(args.strip() or self._args(event))
+        target, _ = self._resolve_target(event, args.strip() or self._args(event))
         if target:
             points = games_extra.get_intimacy(bucket, uid, target)
             return event.plain_result(
@@ -2761,7 +2996,7 @@ class InteractionPlugin(Star):
             return self._deny("社交玩法已关闭。")
         key = self._session_key(event)
         uid, name = self._sender(event)
-        target = self._resolve_uid(args.strip() or self._args(event))
+        target, _ = self._resolve_target(event, args.strip() or self._args(event))
         if not target or target == uid:
             return event.plain_result("用法：表白 @某人")
         user = self.store.get_user(key, uid)
@@ -2796,18 +3031,21 @@ class InteractionPlugin(Star):
             return self._deny(reason)
         if not self._feature_on("social"):
             return self._deny("社交玩法已关闭。")
-        parts = (args.strip() or self._args(event).strip()).split()
-        if not parts:
+        raw = args.strip() or self._args(event).strip()
+        target, rest = self._resolve_target(event, raw)
+        if target == _SELF_TARGET:
+            return event.plain_result("请 @ 一位群友进行对决（不能和自己打）。")
+        if not target:
             return event.plain_result("用法：pk @某人 [赌注]，例如：pk 10001 50")
         key = self._session_key(event)
         uid, name = self._sender(event)
-        target = self._resolve_uid(parts[0])
-        if not target or target == uid:
+        if target == uid:
             return event.plain_result("请 @ 一位群友进行对决（不能和自己打）。")
         default_stake = max(0, self._int("social", "duel_stake", default=20))
+        bet_tokens = rest.split()
         stake = (
-            games.parse_amount(parts[1], default_stake)
-            if len(parts) > 1
+            games.parse_amount(bet_tokens[0], default_stake)
+            if bet_tokens
             else default_stake
         )
         stake = max(0, min(stake, 100000))
@@ -2864,7 +3102,10 @@ class InteractionPlugin(Star):
             return 0
         return games_plus.daily_discount(self._session_key(event), games.today_str())
 
-    @filter.command("竞猜", alias={"预测", "开盘", "wager"})
+    @filter.command(
+        "竞猜",
+        alias={"预测", "开盘", "wager", "数字竞猜", "猜数字竞猜", "猜大小", "比大小"},
+    )
     async def cmd_wager(
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
@@ -2877,29 +3118,35 @@ class InteractionPlugin(Star):
             return self._deny(reason)
         if not self._feature_on("wager"):
             return self._deny("竞猜已关闭。")
-        raw = args.strip() or self._args(event).strip()
-        parts = [p.strip() for p in raw.split("|") if p.strip()] if "|" in raw else []
-        if len(parts) < 3:
+        raw = self._wager_raw_text(event, args)
+        question, options = self._parse_wager_args(raw)
+        if options is None:
             return event.plain_result(
-                "用法：竞猜 问题 | 选项1 | 选项2，例如：竞猜 晚饭吃啥 | 火锅 | 烧烤"
+                "用法：竞猜 问题 | 选项1 | 选项2，例如：竞猜 晚饭吃啥 | 火锅 | 烧烤\n"
+                "也可以只发「数字竞猜」（1~100 猜数字）"
+                "或「竞猜 今晚会不会下雨」（是非题）。"
             )
-        question, options = parts[0], parts[1:]
-        max_options = max(2, min(8, self._int("wager", "max_options", default=5)))
+        max_options = max(2, min(100, self._int("wager", "max_options", default=100)))
         if len(options) > max_options:
             return event.plain_result(f"选项最多 {max_options} 个。")
+        if len(options) < 2:
+            return event.plain_result("至少要 2 个选项。")
         key = self._session_key(event)
         uid, _ = self._sender(event)
         duration = self._int("wager", "duration_seconds", default=180)
         game = games_plus.WagerGame.new(question, options, uid, duration)
+        if not game.options:
+            return event.plain_result("选项解析失败，请重新发起。")
         self._wagers[key] = game
         lines = [
             f"🎲 竞猜开盘：{question}",
             f"时长 {game.duration // 60} 分钟，到期自动开奖",
         ]
-        for i, opt in enumerate(game.options, 1):
-            lines.append(f"{i}. {opt}")
+        # 选项多时按行折叠，避免刷屏（数字竞猜有 100 个选项）
+        options_text = games_plus.render_options(game.options, per_line=10)
+        lines.extend(options_text)
         lines.append(
-            "发送「下注 <序号> <金额>」参与；发起人发「开奖 <序号>」可提前开奖。"
+            "发送「下注 <序号> <金额>」参与；发起人发「开奖 [序号]」可提前开奖。"
         )
         return event.plain_result("\n".join(lines))
 
@@ -3476,9 +3723,7 @@ class InteractionPlugin(Star):
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
-        target = self._resolve_uid(args.strip() or self._args(event)) or str(
-            event.get_sender_id()
-        )
+        target = self._target_or_self(event, args.strip() or self._args(event))
         name = self.store.display_name(key, target)
         entries = self._tag_entries(key, target)
         info = games_tags.summarize(entries)
@@ -3538,7 +3783,7 @@ class InteractionPlugin(Star):
             return self._deny(reason)
         key = self._session_key(event)
         raw = (args.strip() or self._args(event).strip()).strip()
-        target = self._resolve_uid(raw) or str(event.get_sender_id())
+        target = self._target_or_self(event, raw)
         name = self.store.display_name(key, target)
         entries = self._tag_entries(key, target)
 
