@@ -581,7 +581,45 @@ async def main() -> int:
     )
     at_rob.is_at_or_wake_command = False
     record("免@裸口令打劫", await h.call("on_message", at_rob, args=None), ("目标",))
+    # 「抢」这个单字不算动作词：``@某人 抢 3`` 可能只是在说「抢了个红包」
+    plugin.store.add_balance("aiocqhttp_group_888", "w-qiang", 100)
+    at_qiang = make_chain_event(
+        [At(qq="1002", name="用户1002"), Plain(" 抢 3")], uid="w-qiang"
+    )
+    at_qiang.is_at_or_wake_command = False
+    at_qiang.is_wake = False
+    qiang_out = await h.call("on_message", at_qiang, args=None)
+    record(
+        "免@裸口令「抢」不接管",
+        "无输出" if not qiang_out.strip() else qiang_out,
+        ("无输出",),
+    )
+    record(
+        "免@裸口令「抢」未扣款",
+        f"余额 {plugin.store.get_user('aiocqhttp_group_888', 'w-qiang')['balance']}",
+        ("余额 100",),
+    )
     plugin.config["rob"]["enabled"] = rob_cfg_back
+
+    # PK 不写赌注 = 友谊战：被挑战者从没同意过赌注，不能替他下注。
+    # 断言的是**这段代码没扣钱**（差值），不是绝对余额 —— 1002 前面已被
+    # 别的用例动过账，拿绝对数当期望只会写死一个跟本用例无关的数。
+    plugin.store.add_balance("aiocqhttp_group_888", "w-pk", 200)
+    pk_before = {
+        uid: plugin.store.get_user("aiocqhttp_group_888", uid)["balance"]
+        for uid in ("w-pk", "1002")
+    }
+    at_pk = make_chain_event([At(qq="1002", name="用户1002"), Plain("pk")], uid="w-pk")
+    at_pk.is_at_or_wake_command = False
+    at_pk.is_wake = False
+    record(
+        "免@PK无赌注→友谊战", await h.call("on_message", at_pk, args=None), ("友谊战",)
+    )
+    pk_after = {
+        uid: plugin.store.get_user("aiocqhttp_group_888", uid)["balance"]
+        for uid in ("w-pk", "1002")
+    }
+    record("免@PK无赌注未扣款", f"{pk_before}->{pk_after}", (str(pk_before),))
     record("免@无关消息", await send("今天天气不错", uid="w-none"), ())
 
     # 游戏进行中免前缀接管
