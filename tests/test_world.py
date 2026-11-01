@@ -69,9 +69,10 @@ class TestBossFight:
 
     def test_attack_reduces_hp(self):
         fight = gw.BossFight.create("slime")
-        dealt, remaining, killed = fight.attack("a", 300)
-        assert dealt == 300
-        assert remaining == fight.hp_max - 300
+        dealt = min(30, fight.hp)
+        dealt, remaining, killed = fight.attack("a", dealt)
+        assert dealt == 30
+        assert remaining == fight.hp_max - 30
         assert killed is False
 
     def test_overkill_is_capped_at_remaining_hp(self):
@@ -94,66 +95,164 @@ class TestBossFight:
         assert fight.damages == {}
 
 
-class TestBossEconomy:
-    """Boss 战最重要的不变量：**总产出不超过总投入**。
+class TestBossRoster:
+    """Boss 阵容：至少三种、码唯一、弱点打法都在打法表里。"""
 
-    奖池刻意小于模板血量（因为 1 积分 = 1 伤害），所以即使全员满额输出，
-    玩家的总积分也只会减少。这条断言防止有人日后「顺手」把奖池调大。
+    def test_has_several_bosses(self):
+        assert len(gw.BOSSES) >= 5
+
+    def test_codes_are_unique(self):
+        codes = [code for code, *_rest in gw.BOSSES]
+        assert len(codes) == len(set(codes))
+
+    def test_every_boss_has_weakness_style(self):
+        """弱点必须是玩家真能打出来的写法（中文名或英文码都算）。"""
+        styles = {name for name, _code, _counter in gw.BATTLE_STYLES}
+        styles |= {code for _name, code, _counter in gw.BATTLE_STYLES}
+        for code, name, *_rest in gw.BOSSES:
+            assert gw.BOSS_WEAKNESS.get(code) in styles, (
+                f"{name} 的弱点打法不在打法表里"
+            )
+
+    def test_battle_style_accepts_both_names(self):
+        assert gw.battle_style("消耗") == "消耗"
+        assert gw.battle_style("poke") == "消耗"
+        assert gw.battle_style("破甲") == "破甲"
+        assert gw.battle_style("breach") == "破甲"
+
+    def test_hp_and_pool_are_positive_and_growing(self):
+        hp = [row[2] for row in gw.BOSSES]
+        assert all(v > 0 for v in hp)
+        # 血量按难度递增，但不是严格单调：先上「多只可打」，顺序由策划定
+        assert hp == sorted(hp)
+
+    def test_aliases_point_to_real_bosses(self):
+        codes = {code for code, *_rest in gw.BOSSES}
+        for alias, code in gw.BOSS_ALIASES.items():
+            assert code in codes, f"别名 {alias} 指向了不存在的 Boss {code}"
+
+
+class TestBattleMath:
+    """战力 → 伤害 的口径：单调、次线性、有下限。"""
+
+    def test_damage_grows_with_power(self):
+        rng = random.Random(20261101)
+        weak = sum(gw.battle_damage(100, "slime", "", rng)[0] for _ in range(50))
+        strong = sum(gw.battle_damage(1000, "slime", "", rng)[0] for _ in range(50))
+        assert strong > weak
+
+    def test_growth_is_sublinear(self):
+        """10 倍战力不能带来 10 倍伤害 —— 否则会滚雪球。"""
+        rng = random.Random(5)
+        low = sum(gw.battle_damage(100, "slime", "", rng)[0] for _ in range(200)) / 200
+        high = (
+            sum(gw.battle_damage(1000, "slime", "", rng)[0] for _ in range(200)) / 200
+        )
+        assert high < low * 2.5
+        assert high > low
+
+    def test_zero_power_still_hits_minimum(self):
+        damage, _ = gw.battle_damage(0, "slime", "", random.Random(1))
+        assert damage == gw.BATTLE_MIN_HIT
+
+    def test_counter_style_is_better(self):
+        rng = random.Random(9)
+        weak = gw.BOSS_WEAKNESS["slime"]
+        with_counter = gw.battle_damage(1000, "slime", weak, rng)[0]
+        rng = random.Random(9)
+        neutral = gw.battle_damage(1000, "slime", "", rng)[0]
+        assert with_counter > neutral
+
+    def test_dirty_power_does_not_crash(self):
+        for bad in (None, "abc", -5, [], {}):
+            damage, _mult = gw.battle_damage(bad, "slime", "", random.Random(2))
+            assert damage >= gw.BATTLE_MIN_HIT
+
+
+class TestBossEconomy:
+    """Boss 战的唯一产出是赏金，必须被上限死死锁住。
+
+    新模型不扣积分（战力出伤），所以不能再用「产出 ≤ 投入」来约束；
+    改为锁三条硬上限：单人 ≤ 奖池×25%、总额 ≤ 奖池×2、无人参战则不发放。
     """
 
     @pytest.mark.parametrize("code", [c for c, *_rest in gw.BOSSES])
-    def test_pool_is_less_than_hp(self, code):
-        _name, hp, cost, pool, _desc = gw.BOSS_MAP[code]
-        total_spent = hp * cost
-        assert pool < total_spent, f"{code}: 奖池 {pool} 不应超过所需投入 {total_spent}"
+    def test_reward_is_capped(self, code):
+        pool = gw.BOSS_MAP[code][3]
+        for people in (1, 2, 5, 20, 100):
+            damages = {str(i): 10 for i in range(people)}
+            per = gw.battle_reward(pool, damages, people)
+            assert per * people <= pool * gw.BATTLE_REWARD_TOTAL_MULT
+            assert per <= int(pool * gw.BATTLE_REWARD_SHARE)
 
-    def test_full_run_is_net_negative(self):
-        """全员「打满」后，玩家总积分必然减少（合作有损耗）。"""
-        fight = gw.BossFight.create("dragon")
-        spent = 0
-        for uid in ("a", "b", "c"):
-            chunk = 2000
-            spent += chunk
-            fight.attack(uid, chunk)
-        if not fight.finished:
-            spent += fight.hp
-            fight.attack("d", fight.hp)
-        share, _killer = fight.settle()
-        assert sum(share.values()) <= spent
+    def test_no_attendance_pays_nothing(self):
+        assert gw.battle_reward(700, {}, 0) == 0
+        assert gw.battle_reward(700, {"a": 0}, 1) == 0
 
     def test_settle_before_finish_returns_empty(self):
         fight = gw.BossFight.create("slime")
         fight.attack("a", 10)
         assert fight.settle() == ({}, "")
 
-    def test_monte_carlo_stays_net_negative(self):
-        """随机跑 200 局，逐局核对「总产出 ≤ 总投入」。"""
-        rng = random.Random(20261003)
+    def test_settle_pays_at_most_cap_per_person(self):
+        """全员打满后，每人拿到的赏金都不超过奖池上限。"""
+        for code, name, hp, _cost, pool, _desc in gw.BOSSES:
+            fight = gw.BossFight.create(code)
+            for uid in ("a", "b", "c"):
+                fight.attack(uid, hp)
+            share, killer = fight.settle()
+            assert killer in share
+            # boss_share 是「总额守恒」：按伤害占比分完整个奖池
+            assert sum(share.values()) == fight.pool
+            # 真正发到玩家手上的是 battle_reward，它在 boss_share 之上再套上限
+            per = gw.battle_reward(pool, fight.damages, fight.attendance())
+            cap = int(pool * gw.BATTLE_REWARD_SHARE)
+            assert per <= cap, f"{name}: 单人赏金 {per} 超过上限 {cap}"
+            assert per * fight.attendance() <= pool * gw.BATTLE_REWARD_TOTAL_MULT
+
+    def test_monte_carlo_rewards_stay_bounded(self):
+        """随机跑 200 局，逐局核对赏金上限。"""
+        rng = random.Random(20261101)
         for _ in range(200):
             code = rng.choice([c for c, *_rest in gw.BOSSES])
+            pool = gw.BOSS_MAP[code][3]
             fight = gw.BossFight.create(code)
-            spent = 0
             while not fight.finished:
                 uid = f"u{rng.randint(0, 4)}"
-                chunk = rng.randint(1, 900)
-                spent += chunk
-                fight.attack(uid, chunk)
+                fight.attack(uid, rng.randint(1, 120))
             share, _killer = fight.settle()
-            assert sum(share.values()) <= spent
+            people = fight.attendance()
+            per_actual_total = sum(share.values())
+            assert per_actual_total <= pool
+            per = gw.battle_reward(pool, fight.damages, people)
+            assert per * people <= pool * gw.BATTLE_REWARD_TOTAL_MULT
 
-    def test_progress_is_percentage(self):
-        fight = gw.BossFight.create("slime")
-        assert fight.progress == 0
-        fight.attack("a", fight.hp_max // 2)
-        assert 45 <= fight.progress <= 55
-        fight.attack("b", fight.hp_max)
-        assert fight.progress == 100
+    def test_boss_damage_does_not_feed_power(self):
+        """Boss 伤害不能再计入战力：伤害由战力算出，喂回去就是正反馈。"""
+        from astrbot_plugin_hudong import games_plus
 
-    def test_render_contains_name_and_numbers(self):
-        fight = gw.BossFight.create("slime")
-        text = fight.render()
-        assert "史莱姆王" in text
-        assert str(fight.hp_max) in text
+        fields = [field for field, _label, _factor in games_plus.POWER_FACTORS]
+        assert "boss_damage" not in fields
+        assert "boss_kill" in fields
+
+    def test_killing_a_boss_does_not_inflate_next_damage(self):
+        """打一场 Boss 之后，单场伤害不应显著变大（这是本次要修的滚雪球）。"""
+        from astrbot_plugin_hudong import games_plus
+
+        rng = random.Random(2026)
+        user = {"total_sign": 100, "boss_kill": 0, "balance": 0}
+        before = sum(
+            gw.battle_damage(games_plus.battle_power(user), "slime", "", rng)[0]
+            for _ in range(50)
+        )
+        for _ in range(20):
+            user["boss_kill"] = int(user.get("boss_kill", 0)) + 1
+        after = sum(
+            gw.battle_damage(games_plus.battle_power(user), "slime", "", rng)[0]
+            for _ in range(50)
+        )
+        # 20 次击杀会把战力顶到 1000，但伤害只能按对数缓慢增长
+        assert after < before * 3
 
 
 class TestSeason:

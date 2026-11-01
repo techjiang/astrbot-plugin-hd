@@ -27,6 +27,12 @@
         "type": "bool",
         "default": true,
         "hint": "接龙、猜数字、数字炸弹等游戏进行中，无需任何前缀即可直接参与。"
+      },
+      "bare_at_action": {
+        "description": "识别 @某人 转账/打劫 口令",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后「@某人 转账 19」「@某人 打劫 19」可以不写指令名直接生效。\n必须带「转账/打劫」这两个动作词才会执行 —— 只是「@某人 6」这种随口 @ 不会被当成转账。"
       }
     }
   },
@@ -1163,20 +1169,21 @@
   "boss": {
     "description": "群 Boss 战",
     "type": "object",
-    "hint": "全群协作击败 Boss，按伤害占比瓜分奖池。奖池总额小于全员总投入，不存在刷分空间。",
+    "hint": "纯战力玩法：不消耗积分，伤害由战力与克制打法决定。击杀后全群参战者按人数分赏金（有上限，不会凭空多造积分）。",
     "items": {
       "enabled": {
         "description": "启用群 Boss 战",
         "type": "bool",
         "default": true
       },
-      "max_spend": {
-        "description": "单次攻击投入上限",
+      "bounty_scale": {
+        "description": "赏金缩放（%）",
         "type": "int",
-        "default": 5000,
+        "default": 100,
+        "hint": "在 Boss 模板赏金基础上整体缩放。100 为默认，调高会更快积累积分。",
         "slider": {
-          "min": 10,
-          "max": 100000,
+          "min": 0,
+          "max": 300,
           "step": 10
         }
       }

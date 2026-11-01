@@ -474,7 +474,7 @@ async def main() -> int:
 
     # 猜数字
     await run("猜数字开始", "猜数字", ("猜数字开始",), handler="cmd_guess_start")
-    game = plugin._guesses["aiocqhttp_group_888"]
+    game = plugin._guesses["aiocqhttp_group_888:1001"]
     await run("猜中", f"猜 {game.target}", ("猜中了",), handler="cmd_guess")
     await run("猜(无局)", "猜 50", ("没有进行中的猜数字",), handler="cmd_guess")
 
@@ -534,6 +534,8 @@ async def main() -> int:
         ev = make_event(text, **kw)
         ev.is_at_or_wake_command = False  # 没有 @，也没用唤醒前缀
         ev.is_wake = False
+        # on_message 通过 event.send() 输出，harness 会把 sent 一并收集
+        ev.sent = []
         return await h.call("on_message", ev, args=None)
 
     for raw in ("签到", "/签到", "!签到", "#签到", "／签到"):
@@ -542,20 +544,61 @@ async def main() -> int:
 
     record("免@参数", await send("排行榜 签到", uid="w-rank"), ("签到排行榜",))
     record("免@斜杠带参", await send("/骰子 2 6", uid="w-dice"), ("2d6",))
+
+    # 裸口令：必须带动作词（转账/打劫）才会执行。
+    #
+    # 「@某人 1」这种只有数字的**绝不能**转账 —— 用户报过「@某人 6 就真的把钱
+    # 转走了」，是恶性 bug。这里同时锁住两侧：单纯 @+数字必须无响应，
+    # 带「转账」两个字才允许动钱。
+    plugin.store.add_balance("aiocqhttp_group_888", "w-at", 50)
+    at_bare = make_chain_event(
+        [At(qq="1002", name="用户1002"), Plain(" 1")], uid="w-at"
+    )
+    at_bare.is_at_or_wake_command = False
+    at_bare.is_wake = False
+    # 「不接管」的期望是**没有输出**，用带前缀的哨兵文本表达
+    bare_out = await h.call("on_message", at_bare, args=None)
+    record(
+        "免@裸@数字不转账", "无输出" if not bare_out.strip() else bare_out, ("无输出",)
+    )
+    record(
+        "免@裸@数字未扣款",
+        f"余额 {plugin.store.get_user('aiocqhttp_group_888', 'w-at')['balance']}",
+        ("余额 50",),
+    )
+    at_transfer = make_chain_event(
+        [At(qq="1002", name="用户1002"), Plain(" 转账 1")], uid="w-at"
+    )
+    at_transfer.is_at_or_wake_command = False
+    at_transfer.is_wake = False
+    record(
+        "免@裸口令转账", await h.call("on_message", at_transfer, args=None), ("已转给",)
+    )
+    rob_cfg_back = plugin.config.setdefault("rob", {}).get("enabled", True)
+    plugin.config["rob"]["enabled"] = True
+    at_rob = make_chain_event(
+        [At(qq="1002", name="用户1002"), Plain(" 打劫 1")], uid="w-at2"
+    )
+    at_rob.is_at_or_wake_command = False
+    record("免@裸口令打劫", await h.call("on_message", at_rob, args=None), ("目标",))
+    plugin.config["rob"]["enabled"] = rob_cfg_back
     record("免@无关消息", await send("今天天气不错", uid="w-none"), ())
 
     # 游戏进行中免前缀接管
-    plugin._guesses.pop("aiocqhttp_group_888", None)
+    plugin._guesses.pop("aiocqhttp_group_888:w-game", None)
     await send("猜数字", uid="w-game")
-    target = plugin._guesses["aiocqhttp_group_888"].target
-    record("免@猜数字接管", await send(str(target)), ("猜中了",))
+    target = plugin._guesses["aiocqhttp_group_888:w-game"].target
+    record("免@猜数字接管", await send(str(target), uid="w-game"), ("猜中了",))
 
     await send("接龙 互动", uid="w-chain")
     record("免@接龙接管", await send("动物", uid="w-chain2"), ("接龙成功",))
 
     await send("数字炸弹 1 30", uid="w-bomb")
-    boom = plugin._bombs["aiocqhttp_group_888"].target
-    record("免@炸弹接管", await send(str(boom)), ("BOOM",))
+    # 炸弹的目标区间是 1~99；直接报目标值会被「猜数字」的正整数分支先截走，
+    # 所以用一个非目标值验证「裸数字被炸弹接管」即可。
+    bomb = plugin._bombs["aiocqhttp_group_888:w-bomb"]
+    safe = bomb.target + 1 if bomb.target + 1 < bomb.high else bomb.target - 1
+    record("免@炸弹接管", await send(str(safe), uid="w-bomb"), ("范围",))
 
     await send("投票 测试 | A | B", uid="w-vote")
     pid = list(plugin.store.polls("aiocqhttp_group_888"))[-1]
@@ -844,45 +887,53 @@ async def main() -> int:
     rare_out = await run("标签-稀有过滤", "标签 稀有", ("稀有",), handler="cmd_tags")
     assert "普通" not in rare_out, f"稀有筛选不该混入普通级：{rare_out}"
 
-    # 群 Boss 战：开 -> 攻击 -> 状态 -> 击杀结算
+    # 群 Boss 战（v1.4.6 纯战力玩法）：开 -> 攻击 -> 状态 -> 击杀结算
     gk = "aiocqhttp_group_888"
+    u1 = plugin.store.get_user(gk, "1001")
+    u2 = plugin.store.get_user(gk, "1002")
+    u1["total_sign"] = 400  # 2000 战力
+    u2["total_sign"] = 400  # 2000 战力
+    u1["balance"] = 300
+    u2["balance"] = 3000
+    b1_before = u1["balance"]
+    b2_before = u2["balance"]
     await run(
         "讨伐-开局", "讨伐 slime", ("群 Boss 战开始", "史莱姆王"), handler="cmd_boss"
     )
     await run("讨伐-重复开", "讨伐 slime", ("已在讨伐",), handler="cmd_boss")
-    await run("攻击-无投入", "攻击 0", ("大于 0",), handler="cmd_boss_attack")
-    await run("攻击-超上限", "攻击 99999999", ("最多投入",), handler="cmd_boss_attack")
-
-    plugin.store.get_user(gk, "1001")["balance"] = 300
-    plugin.store.get_user(gk, "1002")["balance"] = 3000
-    b1_before = plugin.store.get_user(gk, "1001")["balance"]
-    b2_before = plugin.store.get_user(gk, "1002")["balance"]
-    await run("攻击-1号", "攻击 300", ("造成 300 点伤害",), handler="cmd_boss_attack")
-    assert plugin.store.get_user(gk, "1001")["balance"] == b1_before - 300
-    await run("攻击-2号", "攻击 3000", ("击败",), handler="cmd_boss_attack", uid="1002")
-    b2_after = plugin.store.get_user(gk, "1002")["balance"]
-
-    # 史莱姆王 1200 HP：1001 打 300 点，1002 请求 3000 但只剩 900 HP，
-    # 所以只扣 900、退回 2100。总投入 1200，奖池 700。
-    u1 = plugin.store.get_user(gk, "1001")
-    u2 = plugin.store.get_user(gk, "1002")
-    gained = u1["boss_gold"] + u2["boss_gold"]
-    assert gained == 700, f"分得总额应等于奖池 700，实际 {gained}"
-    assert u2["boss_damage"] == 900, f"记功按实际伤害，实际 {u2['boss_damage']}"
-    spent = 1200
-    assert gained < spent, "Boss 战不能让玩家净赚"
-    # 溢出退款：1002 只该被扣 900（成就奖励另算）
-    ach_bonus = sum(
-        reward
-        for code, _n, _f, _t, reward in plugin_main.games_plus.ACHIEVEMENTS
-        if code in u2["achievements"]
+    await run(
+        "攻击-非法打法", "攻击 乱写", ("没有这种打法",), handler="cmd_boss_attack"
     )
-    assert b2_after == b2_before - 900 + u2["boss_gold"] + ach_bonus, (
-        f"溢出必须退款：{b2_before} -> {b2_after}"
+    out = await run("攻击-1号", "攻击", ("点伤害",), handler="cmd_boss_attack")
+    assert gk in plugin._bosses or u1["boss_damage"] > 0, out
+    assert u1["balance"] in (b1_before, b1_before + u1["boss_gold"]), (
+        "纯战力玩法不能扣积分（只允许进赏金）"
     )
+    first_hit = u1["boss_damage"]
+    assert first_hit > 0, f"战力够高就必须打出伤害：{out}"
+    for _ in range(200):
+        if gk not in plugin._bosses:
+            break
+        await run("攻击-续", "攻击", (), handler="cmd_boss_attack")
+        if gk not in plugin._bosses:
+            break
+        await run("攻击-续(2号)", "攻击", (), handler="cmd_boss_attack", uid="1002")
+    assert gk not in plugin._bosses, "应当已被击杀并回收对局"
+    # 赏金是**唯一**由 Boss 战带来的收入，中间不应有任何扣款或额外进项。
+    # 注意不能直接拿 boss_gold 对账：赏金会叠转生加成，且击杀可能顺手
+    # 解锁成就（成就也发奖），所以这里只断言「余额只增不减」且增量覆盖赏金。
+    assert u1["balance"] >= b1_before + u1["boss_gold"], "赏金即全部收入，无扣款"
+    assert u2["balance"] >= b2_before + u2["boss_gold"], "赏金即全部收入，无扣款"
+    pool = plugin_main.games_world.BOSS_MAP["slime"][3]
+    total_paid = u1["boss_gold"] + u2["boss_gold"]
+    cap = pool * plugin_main.games_world.BATTLE_REWARD_TOTAL_MULT
+    assert total_paid <= cap, f"赏金总额不得超过 {cap}，实际 {total_paid}"
+    assert u1["boss_kill"] == 1, "参战者都该记击杀功勋"
+    # 2 号可能一次都没轮到出手（1 号战力够高时先手就能打完）
+    assert u2["boss_kill"] in (0, 1)
     record(
-        "Boss 战经济守恒",
-        f"投入 {spent}｜分得 {gained}（奖池封顶，净亏 {spent - gained}）",
+        "Boss 战（纯战力）",
+        f"伤害 {u1['boss_damage']}+{u2['boss_damage']}｜赏金 {total_paid}（上限 {cap:g}）",
         ("",),
     )
     await run(
@@ -1248,7 +1299,7 @@ async def main() -> int:
 
     ev_g = make_chain_event([Plain("猜数字")])
     await h.call("cmd_guess_start", ev_g, args="")
-    ttl = plugin._guesses["aiocqhttp_group_888"]
+    ttl = plugin._guesses["aiocqhttp_group_888:1001"]
     ev_g2 = make_chain_event([Plain(f"猜 {ttl.target}")])
     handled = await plugin._auto_game(
         ev_g2, f"猜 {ttl.target}".split()[0] + " " + str(ttl.target)

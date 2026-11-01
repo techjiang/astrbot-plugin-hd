@@ -229,10 +229,19 @@ class TestSeasonGainTracking:
         store.add_balance("s1", "u1", 40)
         assert store.get_user("s1", "u1")["season_gain"] == 140
 
-    def test_transfer_increases_recipient_gain_only(self, store):
+    def test_transfer_does_not_inflate_either_season_gain(self, store):
+        """转账是零和转移：两边赛季增量都不该动。
+
+        老实现只走 add_balance，收款人白涨 200、付款人一分不掉，
+        赛季榜于是可以靠互相打钱刷出来。
+        """
         store.add_balance("s1", "a", 500)
+        store.get_user("s1", "b")
         store.transfer("s1", "a", "b", 200)
-        assert store.get_user("s1", "b")["season_gain"] == 200
+        # 收入不计成绩，支出也不倒扣（「消费 ≠ 亏成绩」）
+        assert store.get_user("s1", "b")["season_gain"] == 0
+        assert store.get_user("s1", "a")["season_gain"] == 500
+        assert store.get_user("s1", "b")["balance"] == 200
 
     def test_dirty_field_is_repaired(self, store):
         store.get_user("s1", "u1")["season_gain"] = "乱写"

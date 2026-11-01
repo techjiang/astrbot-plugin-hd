@@ -732,10 +732,20 @@ def confess_line(a: str, b: str, rng: random.Random | None = None) -> str:
     return rng.choice(_CONFESS_TEMPLATES).format(a=a, b=b)
 
 
-def duel_power(user: dict, rng: random.Random | None = None) -> int:
-    """计算对决战力。
+# PK 的随机扰动幅度：让同水平的对决有悬念，但不会让「零战力」靠运气赢
+# 一位高战力玩家。``duel_by_power`` 里对双方各自乘上 (1 ± DUEL_SWING)。
+DUEL_SWING = 0.12
+# 平局阈值：战斗战力差在这个比例内视为势均力敌
+DUEL_DRAW_RATIO = 0.05
 
-    战力 = 余额 × 0.3 + 胜场 × 20 + 随机扰动(0~60)。
+
+def duel_power(user: dict, rng: random.Random | None = None) -> int:
+    """计算对决战力（兼容旧接口）。
+
+    .. deprecated::
+       新版 PK 用 :func:`duel_by_power`，战力由主流程按「剔除余额」的
+       口径算好再传进来。保留本函数只为兼容外部调用，它内部也改为按
+       ``duel_win`` / ``guess_win`` 等行为计分，不再把余额当主力。
 
     Args:
         user: 用户档案。
@@ -745,15 +755,49 @@ def duel_power(user: dict, rng: random.Random | None = None) -> int:
         战力值（非负整数）。
     """
     rng = rng or random
-    return int(
-        _safe_int(user.get("balance")) * 0.3
-        + _safe_int(user.get("duel_win")) * 20
-        + rng.randint(0, 60)
+    base = (
+        _safe_int(user.get("duel_win")) * 20
+        + _safe_int(user.get("guess_win")) * 8
+        + _safe_int(user.get("code_win")) * 20
+        + _safe_int(user.get("boss_damage")) * 3
     )
+    return max(0, int(base * (1 + rng.uniform(-DUEL_SWING, DUEL_SWING))))
+
+
+def duel_by_power(
+    power_a: int, power_b: int, rng: random.Random | None = None
+) -> tuple[str, int, str]:
+    """按双方战斗战力判定 PK 结果。
+
+    随机只作用于「同水平之间的抖动」，战力差距超过 ``DUEL_SWING`` 时
+    高的一方必胜 —— 这样战力才有意义，而不是变成第二个抽奖。
+
+    Args:
+        power_a: 挑战者的战斗战力。
+        power_b: 应战者的战斗战力。
+        rng: 随机源。
+
+    Returns:
+        ``(胜者, 战力差, 战报文案)``，胜者为 ``"a"``/``"b"``/``"draw"``。
+    """
+    rng = rng or random
+    pa = max(0, _safe_int(power_a, 0))
+    pb = max(0, _safe_int(power_b, 0))
+    ra = pa * (1 + rng.uniform(-DUEL_SWING, DUEL_SWING))
+    rb = pb * (1 + rng.uniform(-DUEL_SWING, DUEL_SWING))
+    diff = int(abs(ra - rb))
+    scale = max(1, max(pa, pb))
+    if diff / scale <= DUEL_DRAW_RATIO:
+        return "draw", diff, "两人势均力敌，打成平手，观众表示值回票价。"
+    winner = "a" if ra > rb else "b"
+    flavor = rng.choice(
+        ("一记漂亮的连招拿下胜利！", "稳扎稳打，步步为营。", "抓住破绽，一击致命！")
+    )
+    return winner, diff, flavor
 
 
 def duel(a: dict, b: dict, rng: random.Random | None = None) -> tuple[str, int, str]:
-    """判定一次 PK 结果。
+    """判定一次 PK 结果（旧接口，按 :func:`duel_power` 结算）。
 
     Args:
         a: 挑战者档案。
@@ -761,19 +805,10 @@ def duel(a: dict, b: dict, rng: random.Random | None = None) -> tuple[str, int, 
         rng: 随机源。
 
     Returns:
-        ``(胜者, 战力差, 战报文案)``，胜者为 ``"a"``/``"b"``/``"draw"``。
+        ``(胜者, 战力差, 战报文案)``。
     """
     rng = rng or random
-    pa = duel_power(a, rng)
-    pb = duel_power(b, rng)
-    diff = abs(pa - pb)
-    if diff < 5:
-        return "draw", diff, "两人势均力敌，打成平手，观众表示值回票价。"
-    winner = "a" if pa > pb else "b"
-    flavor = rng.choice(
-        ("一记漂亮的连招拿下胜利！", "稳扎稳打，步步为营。", "抓住破绽，一击致命！")
-    )
-    return winner, diff, flavor
+    return duel_by_power(duel_power(a, rng), duel_power(b, rng), rng)
 
 
 # --------------------------------------------------------------------- 冷笑话
