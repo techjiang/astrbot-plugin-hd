@@ -502,6 +502,76 @@ SHOP_ITEMS: dict[str, tuple[str, int, str, str]] = {
     "item_coffee": ("赛博咖啡", 30, "consumable", "喝了会显示一句鼓励。"),
 }
 
+# 自定义商品的 ID 前缀：``_conf_schema.json`` 里让管理员只填名称与价格，
+# ID 由「类型 + 名称」自动生成，避免逼非技术用户手搓唯一键。
+_CUSTOM_PREFIX = "custom_"
+# 自定义商品价格上限：防止手滑多打一个 0 把商店变成无底洞
+_CUSTOM_PRICE_MAX = 10_000_000
+
+
+def custom_items(raw: object) -> dict[str, tuple[str, int, str, str]]:
+    """把配置里的自定义商品规整成 ``{ID: (名称, 价格, 类型, 说明)}``。
+
+    条目来自 ``shop.items`` 这类 ``template_list``，管理员可能填空名称、
+    负数价格或干脆留下半条脏数据。这里逐条兜住：
+
+    - 名称为空的条目直接丢弃（无法被「购买 <名称>」命中）；
+    - 价格收敛到 ``1 ~ 10000000``；
+    - 未指定类型时，按名称是否以「称号」/「头像框」开头自动归类。
+
+    Args:
+        raw: 配置值（列表，条目为字典）。
+
+    Returns:
+        规整后的商品表，可直接与内置 ``SHOP_ITEMS`` 合并。
+    """
+    items: dict[str, tuple[str, int, str, str]] = {}
+    if not isinstance(raw, list):
+        return items
+    for index, entry in enumerate(raw, 1):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        price = min(max(1, _safe_int(entry.get("price"), 1)), _CUSTOM_PRICE_MAX)
+        kind = str(entry.get("kind") or "").strip().lower()
+        if kind not in ("title", "frame", "consumable"):
+            if name.startswith("称号"):
+                kind = "title"
+            elif name.startswith("头像框"):
+                kind = "frame"
+            else:
+                kind = "consumable"
+        desc = str(entry.get("desc") or "").strip() or "管理员上架的道具。"
+        item_id = f"{_CUSTOM_PREFIX}{index}"
+        items[item_id] = (name, price, kind, desc)
+    return items
+
+
+def merge_shop(
+    custom: dict[str, tuple[str, int, str, str]] | None = None,
+) -> dict[str, tuple[str, int, str, str]]:
+    """把自定义商品并进内置商品表。
+
+    同名商品以**自定义条目优先**：管理员显式上架的名字应当覆盖内置价格，
+    这样「改名/改价」不需要动代码。
+
+    Args:
+        custom: :func:`custom_items` 的返回值。
+
+    Returns:
+        合并后的完整商品表（新字典，不改动模块级常量）。
+    """
+    merged: dict[str, tuple[str, int, str, str]] = dict(SHOP_ITEMS)
+    for item_id, entry in (custom or {}).items():
+        for existing_id, existing in list(merged.items()):
+            if existing[0] == entry[0]:
+                merged.pop(existing_id)
+        merged[item_id] = entry
+    return merged
+
+
 # 礼物名 -> (emoji, 单价, 基础亲密度加成)
 GIFT_ITEMS: dict[str, tuple[str, int, int]] = {
     "星星": ("⭐", 10, 3),
@@ -512,39 +582,49 @@ GIFT_ITEMS: dict[str, tuple[str, int, int]] = {
 }
 
 
-def resolve_shop_item(query: str) -> tuple[str, str, int, str, str] | None:
+def resolve_shop_item(
+    query: str,
+    shop: dict[str, tuple[str, int, str, str]] | None = None,
+) -> tuple[str, str, int, str, str] | None:
     """按名称/ID 模糊匹配商店道具。
 
     Args:
         query: 用户输入。
+        shop: 商品表，默认内置 ``SHOP_ITEMS``；调用方通常传入
+            :func:`merge_shop` 的结果，以便命中管理员上架的商品。
 
     Returns:
         ``(道具ID, 名称, 价格, 类型, 说明)``；未命中返回 ``None``。
     """
+    table = SHOP_ITEMS if shop is None else shop
     q = (query or "").strip()
     if not q:
         return None
     # 精确匹配 ID 或全名优先
-    for item_id, (name, price, kind, desc) in SHOP_ITEMS.items():
+    for item_id, (name, price, kind, desc) in table.items():
         if q in (item_id, name):
             return item_id, name, price, kind, desc
     # 其次后缀匹配（用户常写「大佬」而不是「称号·大佬」）
-    for item_id, (name, price, kind, desc) in SHOP_ITEMS.items():
+    for item_id, (name, price, kind, desc) in table.items():
         if name.endswith(q) or q in name:
             return item_id, name, price, kind, desc
     return None
 
 
-def item_display_name(item_id: str) -> str:
+def item_display_name(
+    item_id: str,
+    shop: dict[str, tuple[str, int, str, str]] | None = None,
+) -> str:
     """道具 ID 转展示名。
 
     Args:
         item_id: 道具 ID。
+        shop: 商品表，默认内置 ``SHOP_ITEMS``。
 
     Returns:
         展示名；未知 ID 原样返回。
     """
-    entry = SHOP_ITEMS.get(item_id)
+    entry = (SHOP_ITEMS if shop is None else shop).get(item_id)
     return entry[0] if entry else item_id
 
 

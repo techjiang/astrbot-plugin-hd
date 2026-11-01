@@ -895,7 +895,11 @@ async def main() -> int:
         "赛季-查看", "赛季", ("的赛季", "段位"), handler="cmd_season", uid=season_uid
     )
     gain_now = plugin.store.get_user(gk, season_uid)["season_gain"]
-    expected_reward = plugin_main.games_world.season_reward(gain_now)
+    # 口径变了：奖励按「已解锁的最高档位」一次性补齐（青铜~当前段位合计），
+    # 不再只发当前档位的绝对值 —— 这样管理员调整档位奖励时不会重复/漏发。
+    expected_reward = sum(
+        row[2] for row in plugin_main.games_world.season_pending(gain_now)
+    )
     assert expected_reward > 0, "有积分增量却没有可领奖励，说明赛季口径断了"
     balance_before_claim = plugin.store.get_user(gk, season_uid)["balance"]
     season_out = await run(

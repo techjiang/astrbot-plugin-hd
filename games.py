@@ -33,6 +33,75 @@ LOTTERY_POOL: list[tuple[int, str, str, int]] = [
     (1, "item", "头像框：天选之人", 0),
 ]
 
+# 奖池条目的最小 / 最大权重，用于收敛管理员手写的脏权重
+_LOTTERY_WEIGHT_MAX = 100000
+
+
+def lottery_pool(
+    raw: object = None, default: list[tuple[int, str, str, int]] | None = None
+) -> list[tuple[int, str, str, int]]:
+    """把配置里的奖池条目规整成 ``(权重, 类型, 文案, 数值)`` 列表。
+
+    管理员会在 WebUI 里手填奖池，值可能是空串、负数、字符串数字，
+    甚至整条被删干净。这里逐条兜住：权重收敛到 ``1 ~ 100000``，
+    类型不认识就按积分处理，文案为空则自动补一个，条目残缺直接丢弃。
+
+    一条都解析不出来时回退到内置奖池 —— 奖池为空会让抽奖彻底不可用，
+    这属于「配错了也得能跑」的场景。
+
+    Args:
+        raw: 配置值（``template_list`` 的列表，条目为字典）。
+        default: 解析失败时的回退奖池，默认内置 ``LOTTERY_POOL``。
+
+    Returns:
+        可直接喂给 ``random.choices`` 的奖池列表。
+    """
+    fallback = LOTTERY_POOL if default is None else list(default)
+    if not isinstance(raw, list):
+        return list(fallback)
+    pool: list[tuple[int, str, str, int]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        weight = min(max(1, _safe_int(entry.get("weight"), 1)), _LOTTERY_WEIGHT_MAX)
+        kind = str(entry.get("kind") or "amount").strip().lower()
+        if kind not in ("amount", "item"):
+            kind = "amount"
+        label = str(entry.get("label") or "").strip()
+        value = _safe_int(entry.get("value"), 0)
+        if kind == "amount":
+            value = max(0, value)
+            if not label:
+                label = f"{value} 积分" if value else "谢谢参与"
+        else:
+            if not label:
+                # 奖励是称号却忘了写名字：这种条目对玩家毫无意义，丢掉
+                continue
+            value = 0
+        pool.append((weight, kind, label, value))
+    return pool or list(fallback)
+
+
+def lottery_expected(pool: list[tuple[int, str, str, int]]) -> float:
+    """计算奖池的期望回报（只算积分，称号按 0 价值计）。
+
+    Args:
+        pool: 奖池列表。
+
+    Returns:
+        单次抽奖的期望积分回报；奖池非法时返回 0。
+    """
+    total = sum(max(0, weight) for weight, *_ in pool)
+    if total <= 0:
+        return 0.0
+    gained = sum(
+        max(0, weight) * max(0, value)
+        for weight, kind, _label, value in pool
+        if kind == "amount"
+    )
+    return gained / total
+
+
 # 高频台词池，避免回复机械重复
 GUESS_HOT_HINTS = ("非常接近了！", "就差一点点！", "感觉很近了！")
 SIGN_FLAVORS = (
@@ -347,12 +416,55 @@ def sign_in(
 # --------------------------------------------------------------------- 抽奖
 
 
+def apply_rebirth_bonus(amount: int, rebirth: int) -> int:
+    """把转生收益加成作用到一笔奖励上（无状态版本）。
+
+    ``games_plus.apply_bonus`` 才是权威实现，但 ``games`` 是被它 import 的
+    底层模块，直接反向 import 会成环。这里按同一套常量复刻一份，
+    并用 ``tests/test_games.py`` 里的对拍用例锁死两者结果一致。
+
+    Args:
+        amount: 原始奖励。
+        rebirth: 转生次数。
+
+    Returns:
+        加成后的奖励（正数至少为 1）。
+    """
+    base = _safe_int(amount, 0)
+    if base <= 0:
+        return 0
+    times = min(max(_safe_int(rebirth, 0), 0), 20)
+    return max(1, int(base * round(1.0 + times * 0.05, 4)))
+
+
+def lottery_cost_floor(pool: list[tuple[int, str, str, int]]) -> int:
+    """按奖池期望反推抽奖的安全消耗下限。
+
+    奖池被管理员改过之后，原价可能已经低于期望回报（例如把大奖权重调到
+    90%）。这里按「回报率不超过 95%」反推一个下限，运行期把配置价抬上去，
+    保证任何奖池配置下抽奖都**不会变成印钞机**。
+
+    Args:
+        pool: 奖池列表。
+
+    Returns:
+        安全的最小消耗（向上取整，至少 1）。
+    """
+    ev = lottery_expected(pool)
+    if ev <= 0:
+        return 0
+    return max(1, int(ev / 0.95) + (1 if ev / 0.95 % 1 else 0))
+
+
 def lottery_draw(
     user: dict,
     cost: int,
     cooldown: int,
     now: float | None = None,
     rng: random.Random | None = None,
+    pool: list[tuple[int, str, str, int]] | None = None,
+    apply_bonus: bool = False,
+    rebirth: int = 0,
 ) -> tuple[bool, int, str, str]:
     """执行一次抽奖。
 
@@ -364,6 +476,13 @@ def lottery_draw(
         cooldown: 冷却秒数。
         now: 当前时间戳，默认取系统时间。
         rng: 随机源。
+        pool: 奖池，默认使用内置 ``LOTTERY_POOL``；管理员可在
+            ``lottery.pool`` 里自定义，这里只管使用、不做二次收敛。
+        apply_bonus: 是否把转生加成作用到积分奖励上。内置奖池刻意留了
+            「期望略低于消耗」的安全边际，一旦乘以转生倍率就会翻正，
+            所以这项默认关闭，需管理员在 ``lottery.bonus_enabled`` 里显式开启
+            （届时 ``cost`` 由调用方按期望自动抬高，见 :func:`lottery_cost_floor`）。
+        rebirth: 转生次数，仅在 ``apply_bonus`` 为真时使用。
 
     Returns:
         ``(是否成功, 积分净变化量, 奖品文案, 失败原因)``。
@@ -378,19 +497,25 @@ def lottery_draw(
     if balance < cost:
         return False, 0, "", f"积分不足，抽奖需要 {cost} 积分。"
 
-    weights = [w for w, *_ in LOTTERY_POOL]
-    _, kind, label, value = rng.choices(LOTTERY_POOL, weights=weights, k=1)[0]
+    entries = list(pool) if pool else list(LOTTERY_POOL)
+    weights = [max(1, w) for w, *_ in entries]
+    _, kind, label, value = rng.choices(entries, weights=weights, k=1)[0]
+    if kind == "amount" and apply_bonus and value > 0:
+        value = apply_rebirth_bonus(value, rebirth)
 
     user["last_lottery_ts"] = now
     user["lottery_count"] = _safe_int(user.get("lottery_count", 0), 0) + 1
 
     delta = -cost
+    # 先扣钱、再发奖，而不是「一步算出净值」。两者对余额的结果相同，
+    # 但分两步才让调用方能分别记账：赛季增量统计的是「赚进来的」，
+    # 一步写成 net 会让中奖的 120 完全不算成绩（净变动是正还是负取决于成本）。
+    user["balance"] = max(0, balance - cost)
     if kind == "amount":
         delta += value
-        user["balance"] = max(0, balance + delta)
+        user["balance"] = max(0, int(user["balance"]) + value)
         prize = f"{label}（{value:+d} 积分）" if value else label
     else:
-        user["balance"] = max(0, balance - cost)
         titles = user.setdefault("titles", [])
         if not isinstance(titles, list):
             titles = []

@@ -266,6 +266,73 @@ SEASON_TIERS: tuple[tuple[int, str, int], ...] = (
 )
 
 
+# 档位名到默认阈值的映射，供配置覆盖时复用（保持名字稳定，只让管理员改数值）
+SEASON_TIER_NAMES = tuple(name for _threshold, name, _reward in SEASON_TIERS)
+
+# 赛季奖励的硬上限。档位奖励来自配置，配错一个数量级就会变成印钞机，
+# 这里给个天花板兜住（足够大，正常运营碰不到）。
+SEASON_REWARD_MAX = 1_000_000
+SEASON_THRESHOLD_MAX = 100_000_000
+
+
+def season_tiers(
+    raw: object = None,
+) -> list[tuple[int, str, int]]:
+    """把配置里的赛季档位规整成 ``[(阈值, 段位名, 奖励), ...]``。
+
+    管理员可能在 WebUI 里把阈值填成倒序、负数、甚至只填一半。
+    这里统一处理：
+
+    - 阈值收敛到 ``0 ~ 1e8`` 并对**升序排序**（段位必须单调）；
+    - 奖励收敛到 ``0 ~ 1e6``；
+    - 名称为空时用内置档位名补齐；
+    - 解析不出任何有效档位时回退到内置 ``SEASON_TIERS``。
+
+    Args:
+        raw: 配置值（列表，条目含 ``threshold`` / ``name`` / ``reward``）。
+
+    Returns:
+        升序且至少一项的档位列表。
+    """
+    fallback = list(SEASON_TIERS)
+    if not isinstance(raw, list):
+        return fallback
+    tiers: list[tuple[int, str, int]] = []
+    meaningful = False
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            continue
+        threshold = _clamp(
+            entry.get("threshold"), 0, SEASON_THRESHOLD_MAX, index * 1000
+        )
+        reward = _clamp(entry.get("reward"), 0, SEASON_REWARD_MAX, 0)
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            pos = min(index, len(SEASON_TIER_NAMES) - 1)
+            name = SEASON_TIER_NAMES[pos]
+        # 「门槛和奖励都被写成脏值」的条目说明这行是废的：
+        # 收它会让整张表退化成一个 0 门槛 0 奖励的假档位，
+        # 玩家攒再多分也领不到奖励（比直接回退默认值糟糕得多）。
+        if (
+            _clamp(entry.get("threshold"), -1, SEASON_THRESHOLD_MAX, -1) >= 0
+            or _clamp(entry.get("reward"), -1, SEASON_REWARD_MAX, -1) >= 0
+        ):
+            meaningful = True
+        tiers.append((threshold, name, reward))
+    if not tiers or not meaningful:
+        return fallback
+    tiers.sort(key=lambda row: row[0])
+    # 同名档位会让「当前段位」显示得莫名其妙，顺手去重（保留先出现的）
+    seen: set[str] = set()
+    deduped: list[tuple[int, str, int]] = []
+    for row in tiers:
+        if row[1] in seen:
+            continue
+        seen.add(row[1])
+        deduped.append(row)
+    return deduped or fallback
+
+
 def season_of(day: str) -> str:
     """由日期推出赛季标识。
 
@@ -282,18 +349,54 @@ def season_of(day: str) -> str:
     return f"{parts[0]}-{int(parts[1]):02d}"
 
 
-def season_tier(gain: int) -> tuple[int, str, int]:
+def normalize_tiers(
+    tiers: object = None,
+) -> list[tuple[int, str, int]]:
+    """把外部传入的档位表收敛成引擎能安全比较的形态。
+
+    调用方既可能传 ``season_tiers()`` 的结果，也可能直接把配置里的
+    ``[{"threshold": ...}]`` 原样塞进来。后者如果混进字符串阈值，
+    排序与比较都会抛 ``TypeError`` —— 一次配置手滑不该让指令崩掉。
+
+    Args:
+        tiers: 档位表（已规整的元组列表，或原始配置列表）。
+
+    Returns:
+        升序的 ``[(阈值, 段位名, 奖励), ...]``。
+    """
+    if not tiers:
+        return list(SEASON_TIERS)
+    if all(isinstance(row, (list, tuple)) and len(row) >= 3 for row in tiers):
+        rows = [
+            (
+                _clamp(row[0], 0, SEASON_THRESHOLD_MAX, 0),
+                str(row[1]),
+                _clamp(row[2], 0, SEASON_REWARD_MAX, 0),
+            )
+            for row in tiers  # type: ignore[union-attr]
+            if isinstance(row, (list, tuple))
+        ]
+        rows.sort(key=lambda row: row[0])
+        return rows or list(SEASON_TIERS)
+    return season_tiers(tiers)
+
+
+def season_tier(
+    gain: int, tiers: list[tuple[int, str, int]] | None = None
+) -> tuple[int, str, int]:
     """按本季积分增量定位段位。
 
     Args:
         gain: 本季积分增量（负值按 0 处理）。
+        tiers: 档位表，默认内置 ``SEASON_TIERS``；运行期传入管理员配置。
 
     Returns:
         ``(最低增量, 段位名, 奖励积分)``。
     """
+    table = normalize_tiers(tiers)
     value = max(0, _safe_int(gain, 0))
-    tier = SEASON_TIERS[0]
-    for entry in SEASON_TIERS:
+    tier = table[0]
+    for entry in table:
         if value >= entry[0]:
             tier = entry
         else:
@@ -301,33 +404,66 @@ def season_tier(gain: int) -> tuple[int, str, int]:
     return tier
 
 
-def season_reward(gain: int) -> int:
+def season_reward(gain: int, tiers: list[tuple[int, str, int]] | None = None) -> int:
     """计算赛季结算奖励。
 
     Args:
         gain: 本季积分增量。
+        tiers: 档位表，默认内置。
 
     Returns:
         奖励积分。
     """
-    return season_tier(gain)[2]
+    return season_tier(gain, tiers)[2]
 
 
-def season_progress(gain: int) -> tuple[str, str, int]:
+def season_progress(
+    gain: int, tiers: list[tuple[int, str, int]] | None = None
+) -> tuple[str, str, int]:
     """计算距离下一段位还差多少。
 
     Args:
         gain: 本季积分增量。
+        tiers: 档位表，默认内置。
 
     Returns:
         ``(当前段位, 下一段位或 "已封顶", 还差多少)``。
     """
+    table = normalize_tiers(tiers)
     value = max(0, _safe_int(gain, 0))
-    current = season_tier(value)[1]
-    for threshold, name, _reward in SEASON_TIERS:
+    current = season_tier(value, table)[1]
+    for threshold, name, _reward in table:
         if value < threshold:
             return current, name, threshold - value
     return current, "已封顶", 0
+
+
+def season_pending(
+    gain: int,
+    tiers: list[tuple[int, str, int]] | None = None,
+) -> list[tuple[int, str, int]]:
+    """列出「按历史最高段位」仍可补领的档位。
+
+    赛季奖励是**逐档解锁**而不是「总余额式已领」：老实现用一个
+    ``season_reward`` 字段记住「上次领到多少奖励」，于是管理员把档位奖励
+    上调后，玩家会因为「奖励总额看起来变多了」而莫名其妙地能再领一次；
+    下调后又会永远领不到。改成按「已解锁的最高档位序号」记账，
+    行为就与档位数值解耦了。
+
+    Args:
+        gain: 本季积分增量。
+        tiers: 档位表，默认内置。
+
+    Returns:
+        可补领的 ``[(序号, 段位名, 奖励), ...]``，按档位升序。
+    """
+    table = normalize_tiers(tiers)
+    value = max(0, _safe_int(gain, 0))
+    rows: list[tuple[int, str, int]] = []
+    for index, (threshold, name, reward) in enumerate(table, 1):
+        if value >= threshold:
+            rows.append((index, name, reward))
+    return rows
 
 
 # --------------------------------------------------------------------- 养成（宠物 / 家园）

@@ -100,7 +100,8 @@
           "min": 0,
           "max": 1000,
           "step": 1
-        }
+        },
+        "hint": "奖池被改动后，这里填的价格会被自动抬到安全下限（按奖池期望的 95% 反推），保证抽奖永远不是印钞机。"
       },
       "cooldown_seconds": {
         "description": "冷却时间（秒）",
@@ -111,9 +112,65 @@
           "max": 3600,
           "step": 5
         }
+      },
+      "bonus_enabled": {
+        "description": "抽奖享受转生加成",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关闭：内置奖池的期望本就低于消耗，乘上转生倍率会变成正期望。开启后单次消耗会按最高倍率自动抬高，仍然不会造币。"
+      },
+      "pool": {
+        "description": "自定义奖池",
+        "type": "template_list",
+        "default": [],
+        "hint": "留空则使用内置奖池。新增条目：类型选「积分」按数值发奖，选「称号/头像框」则发放该名称的收藏品。",
+        "templates": {
+          "prize": {
+            "name": "奖池条目",
+            "hint": "权重越大越容易抽到；积分奖的数值就是发放数量。",
+            "items": {
+              "kind": {
+                "description": "奖品类型",
+                "type": "string",
+                "default": "amount",
+                "options": [
+                  "amount",
+                  "item"
+                ],
+                "hint": "amount=积分，item=称号/头像框等收藏品（不发放积分）。"
+              },
+              "label": {
+                "description": "奖品名称",
+                "type": "string",
+                "default": "",
+                "hint": "显示在抽奖结果里；积分奖留空会自动写成「N 积分」。"
+              },
+              "value": {
+                "description": "积分数量",
+                "type": "int",
+                "default": 0,
+                "slider": {
+                  "min": 0,
+                  "max": 100000,
+                  "step": 1
+                }
+              },
+              "weight": {
+                "description": "权重",
+                "type": "int",
+                "default": 10,
+                "slider": {
+                  "min": 1,
+                  "max": 10000,
+                  "step": 1
+                }
+              }
+            }
+          }
+        }
       }
     },
-    "hint": "抽奖消耗积分。奖池期望值刻意略低于单次消耗，长期刷抽奖不会变成印钞机（默认 20 消耗对约 14 期望）。"
+    "hint": "抽奖消耗积分，奖池可在下方「自定义奖池」里整体替换。内置奖池的期望值刻意略低于单次消耗（默认 20 消耗对约 14 期望），自定义奖池低于期望时价格会被自动抬高。"
   },
   "guess_number": {
     "description": "猜数字设置",
@@ -571,6 +628,51 @@
         "type": "bool",
         "default": true,
         "hint": "每个群每天会随机到 0~30% 的商店折扣，同一天结果稳定。"
+      },
+      "items": {
+        "description": "自定义商品",
+        "type": "template_list",
+        "default": [],
+        "hint": "与内置商品同名时以这里为准（可直接改价）。名称以「称号」「头像框」开头时会自动归类，也可以在类型里指定。",
+        "templates": {
+          "product": {
+            "name": "商品",
+            "items": {
+              "name": {
+                "description": "商品名称",
+                "type": "string",
+                "default": "",
+                "hint": "玩家用「购买 <名称>」下单，同名会覆盖内置商品。"
+              },
+              "price": {
+                "description": "价格",
+                "type": "int",
+                "default": 100,
+                "slider": {
+                  "min": 1,
+                  "max": 10000000,
+                  "step": 1
+                }
+              },
+              "kind": {
+                "description": "类型",
+                "type": "string",
+                "default": "consumable",
+                "options": [
+                  "title",
+                  "frame",
+                  "consumable"
+                ],
+                "hint": "title=称号，frame=头像框，consumable=消耗品/收藏品。"
+              },
+              "desc": {
+                "description": "说明",
+                "type": "string",
+                "default": ""
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -1083,12 +1185,50 @@
   "season": {
     "description": "赛季",
     "type": "object",
-    "hint": "按自然月分赛季，以「本季积分增量」定位段位，避免老玩家永久霸榜。",
+    "hint": "按自然月分赛季，以「本季积分增量」定位段位，避免老玩家永久霸榜。档位与奖励可在下方「赛季档位」里自定义。",
     "items": {
       "enabled": {
         "description": "启用赛季",
         "type": "bool",
         "default": true
+      },
+      "tiers": {
+        "description": "赛季档位",
+        "type": "template_list",
+        "default": [],
+        "hint": "留空则使用内置档位（青铜 0 / 白银 500 / 黄金 2000 / 铂金 8000 / 钻石 30000 / 王者 100000）。奖励按「已解锁的最高档位」逐档发放，改奖励不会让玩家重复领取。",
+        "templates": {
+          "tier": {
+            "name": "档位",
+            "items": {
+              "name": {
+                "description": "段位名",
+                "type": "string",
+                "default": ""
+              },
+              "threshold": {
+                "description": "所需本季积分",
+                "type": "int",
+                "default": 0,
+                "slider": {
+                  "min": 0,
+                  "max": 100000000,
+                  "step": 100
+                }
+              },
+              "reward": {
+                "description": "档位奖励",
+                "type": "int",
+                "default": 0,
+                "slider": {
+                  "min": 0,
+                  "max": 1000000,
+                  "step": 10
+                }
+              }
+            }
+          }
+        }
       }
     }
   },
