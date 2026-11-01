@@ -89,7 +89,8 @@ USER_FIELDS: dict[str, Any] = {
     "pet": {},  # 宠物状态：{name, care, fed_at, born}
     "season_tag": "",  # 上次结算的赛季标识
     "season_gain": 0,  # 本季累计积分增量
-    "season_reward": 0,  # 本季已领奖励合计
+    "season_reward": 0,  # 本季已领奖励合计（仅统计用）
+    "season_tier": 0,  # 本季已领奖励对应的最高档位序号（1 起）
 }
 
 

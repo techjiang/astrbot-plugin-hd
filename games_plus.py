@@ -1234,3 +1234,64 @@ def rebirth_reset(user: dict) -> tuple[bool, str]:
         f"积分与称号已重置，收益加成提升至 ×{rebirth_bonus(times + 1):.2f}。"
         f"（统计数据与成就全部保留）"
     )
+
+
+# --------------------------------------------------------------------- 战力公式
+
+# 战力 = 余额 + 签到天数×5 + 打劫次数×10 + 竞猜命中×15
+#        + 解题类命中×20 + 群 Boss 伤害×3 + 赛季积分×0.5
+# 权重表：(字段, 展示名, 系数, 取整方式)
+#
+# 为什么是「余额 + 行为计数」而不是别的：它必须**可解释**。玩家看到公式后
+# 能自己算出为什么隔壁老王战力比他高，而不是面对一个黑箱。所有权重都是
+# 公开常量，``战力`` 指令会把它们连同本人数值一起打印出来。
+POWER_FACTORS: tuple[tuple[str, str, float], ...] = (
+    ("balance", "积分余额", 1.0),
+    ("total_sign", "累计签到", 5.0),
+    ("rob_win", "打劫成功", 10.0),
+    ("wager_win", "竞猜命中", 15.0),
+    ("guess_win", "猜中数字", 8.0),
+    ("code_win", "数字破解", 20.0),
+    ("ttt_win", "井字棋胜", 8.0),
+    ("mine_clear", "扫雷通关", 10.0),
+    ("bj_win", "21点胜", 6.0),
+    ("duel_win", "PK 胜利", 12.0),
+    ("boss_damage", "群 Boss 伤害", 3.0),
+    ("boss_kill", "群 Boss 击杀", 50.0),
+    ("season_gain", "本赛季积分", 0.5),
+)
+
+
+def power_breakdown(user: dict) -> list[tuple[str, int, float, int]]:
+    """拆解战力构成。
+
+    Args:
+        user: 用户档案。
+
+    Returns:
+        ``[(展示名, 原始值, 系数, 贡献值), ...]``，只保留有贡献的项。
+    """
+    rows: list[tuple[str, int, float, int]] = []
+    for field_name, label, factor in POWER_FACTORS:
+        value = max(0, _safe_int(user.get(field_name, 0), 0))
+        if value <= 0:
+            continue
+        rows.append((label, value, factor, int(value * factor)))
+    return rows
+
+
+def power_of(user: dict) -> int:
+    """计算战力总分。
+
+    战力是「活跃度 + 资产」的加权和，不参与任何结算，
+    只用于展示与排行，因此不做上限收敛。
+
+    Args:
+        user: 用户档案。
+
+    Returns:
+        战力整数。
+    """
+    return sum(
+        contribution for _label, _value, _f, contribution in power_breakdown(user)
+    )
