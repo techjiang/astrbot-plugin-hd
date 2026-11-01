@@ -238,10 +238,17 @@ async def test_pk_result_matches_battle_power(plugin):
 
 
 def test_boss_damage_scales_with_power():
+    """战力越高伤害越高，但**必须是次线性**的。
+
+    早期版本伤害 = 战力，而战力里又含「Boss 伤害 ×3」，于是打一场战力翻倍、
+    下一场伤害再翻倍，几轮就打到天上去了。现在伤害走对数刻度：
+    涨，但绝不会按战力倍数涨。
+    """
     rng = random.Random(3)
     weak, _ = games_world.battle_damage(100, "slime", "", rng)
     strong, _ = games_world.battle_damage(1000, "slime", "", rng)
-    assert strong > weak * 5
+    assert strong > weak
+    assert strong < weak * 2.5
 
 
 def test_boss_bounty_never_exceeds_cap():

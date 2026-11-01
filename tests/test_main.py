@@ -1014,11 +1014,13 @@ async def test_boss_damage_grows_with_power(plugin):
     strong = plugin.store.get_user(key, "2002")
     strong["total_sign"] = 200  # 200 × 5 = 1000 战力
     weak["total_sign"] = 2  # 10 战力
-    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    await run(plugin, "cmd_boss", make_event("讨伐 leviathan"))
     await run(plugin, "cmd_boss_attack", make_event("攻击", uid="2001"))
     await run(plugin, "cmd_boss_attack", make_event("攻击", uid="2002"))
     fight = plugin._bosses[key]
-    assert fight.damages["2002"] > fight.damages["2001"] * 5
+    # 100 倍战力必须有肉眼可见的差距，但不能等比例放大（对数刻度）
+    assert fight.damages["2002"] > fight.damages["2001"] * 2
+    assert fight.damages["2002"] < fight.damages["2001"] * 8
 
 
 @pytest.mark.asyncio
@@ -1061,6 +1063,84 @@ async def test_boss_kill_pays_bounty_and_records_kills(plugin):
     )
     assert 0 < u1["boss_gold"] <= cap
     assert 0 < u2["boss_gold"] <= cap
+
+
+@pytest.mark.asyncio
+async def test_boss_grants_no_power_for_damage(plugin):
+    """打 Boss 不该涨战力（用户反馈：打完直接成「大运」）。
+
+    Boss 伤害曾是战力来源（×3），而伤害又由战力算出 —— 打完一场战力翻倍，
+    下一场伤害跟着翻倍。现在伤害不计入战力，只有击杀次数算（离散、有上限）。
+    """
+    key = "aiocqhttp_group_888"
+    user = plugin.store.get_user(key, "1001")
+    user["total_sign"] = 20  # 100 战力
+    # 用战斗战力口径：展示战力包含「积分余额」，赏金进账会让它天然上涨，
+    # 那是钱变多了，不是「打 Boss 涨战力」。
+    before = plugin_main.games_plus.battle_power(user)
+    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    for _ in range(30):
+        if key not in plugin._bosses:
+            break
+        await run(plugin, "cmd_boss_attack", make_event("攻击 强攻", uid="1001"))
+    after = plugin_main.games_plus.battle_power(user)
+    # 只有击杀功勋（+50）会涨；伤害、赏金、赛季增量都不该进战斗战力
+    fields = [row[0] for row in plugin_main.games_plus.power_breakdown(user, False)]
+    assert "boss_damage" not in fields
+    assert "season_gain" not in fields
+    assert after - before == 50, (
+        f"打一场 Boss 战斗战力涨了 {after - before}，应只有击杀功勋 50"
+    )
+
+
+@pytest.mark.asyncio
+async def test_boss_bounty_matches_reported_amount(plugin):
+    """战报里的「你分得 X」必须等于余额的真实变化。
+
+    上一版文案写的是基准值，而 _reward 还会叠转生加成，
+    于是「说了给 6500，实际给了更多」—— 预告与实发对不上。
+    """
+    key = "aiocqhttp_group_888"
+    user = plugin.store.get_user(key, "1001")
+    user["total_sign"] = 60  # 300 战力
+    user["rebirth"] = 3  # 有转生加成，放大预告/实发的偏差
+    balance_before = int(user["balance"])
+    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    out = ""
+    for _ in range(30):
+        if key not in plugin._bosses:
+            break
+        out = await run(plugin, "cmd_boss_attack", make_event("攻击 强攻", uid="1001"))
+    gained = int(user["balance"]) - balance_before
+    # 从战报里抠出「你分得 N」
+    import re
+
+    match = re.search(r"你分得 (\d+)", out)
+    assert match, out
+    assert int(match.group(1)) == gained, f"战报说 {match.group(1)}，实发 {gained}"
+
+
+@pytest.mark.asyncio
+async def test_boss_lists_all_bosses(plugin):
+    """「还有别的 Boss 吗」—— 名单要能列出来，别名要能匹配。"""
+    out = await run(plugin, "cmd_boss_info", make_event("讨伐状态"))
+    for _code, name, *_rest in plugin_main.games_world.BOSSES:
+        assert name in out, f"名单里缺少 {name}"
+    assert "别名" in out
+
+
+@pytest.mark.asyncio
+async def test_boss_alias_opens_right_fight(plugin):
+    key = "aiocqhttp_group_888"
+    await run(plugin, "cmd_boss", make_event("讨伐 海怪"))
+    assert plugin._bosses[key].code == "kraken"
+
+
+@pytest.mark.asyncio
+async def test_boss_unknown_name_lists_roster(plugin):
+    out = await run(plugin, "cmd_boss", make_event("讨伐 一条不存在的龙"))
+    assert "没有这个 Boss" in out
+    assert "史莱姆王" in out
 
 
 @pytest.mark.asyncio

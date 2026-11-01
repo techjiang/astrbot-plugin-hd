@@ -270,31 +270,49 @@ async def test_guess_prefixed_without_game_hints(plugin):
 # 分发末尾被静默丢弃 —— 上报的「转账/打劫没法触发」就是它。
 
 
-async def test_bare_at_transfer(plugin):
+async def test_bare_at_number_is_not_a_transfer(plugin):
+    """用户报的恶性 bug：``@某人 6`` 被当成转账，钱真的转走了。
+
+    群里「@ 一下然后随口打个数字」极常见（玩梗、吐槽、手滑），
+    这类消息**绝不能**触发资产操作。
+    """
     key = "aiocqhttp_group_888"
     plugin.store.add_balance(key, "1001", 100)
-    ev = at_event(False, " 19", mention=("1002", "诺里"))
-    out = await say(plugin, ev)
-    assert "已转给" in out
-    assert plugin.store.get_user(key, "1002")["balance"] == 19
+    ev = at_event(False, " 6", mention=("1002", "夕涵镀"))
+    assert await say(plugin, ev) == ""
+    assert plugin.store.get_user(key, "1001")["balance"] == 100
+    assert plugin.store.get_user(key, "1002")["balance"] == 0
 
 
-async def test_bare_at_transfer_with_action_word(plugin):
+async def test_bare_at_transfer_needs_action_word(plugin):
+    """裸口令必须写明「转账」两个字。"""
     key = "aiocqhttp_group_888"
     plugin.store.add_balance(key, "1001", 100)
     ev = at_event(False, " 转账 19", mention=("1002", "诺里"))
     out = await say(plugin, ev)
     assert "已转给" in out
+    assert plugin.store.get_user(key, "1002")["balance"] == 19
 
 
-async def test_bare_at_defaults_to_transfer_not_rob(plugin):
-    """缺省动作按转账处理：它可撤回、不会让对方掉钱。"""
+async def test_bare_at_action_word_but_no_amount(plugin):
+    """只写「转账」不写金额：交给转账自己的用法提示，不静默吞掉。"""
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 100)
+    ev = at_event(False, " 转账", mention=("1002", "诺里"))
+    out = await say(plugin, ev)
+    assert "数量" in out
+    assert plugin.store.get_user(key, "1001")["balance"] == 100
+
+
+async def test_bare_at_transfer_does_not_rob(plugin):
+    """带「转账」动作词时只能转账，永远不能变成打劫。"""
     key = "aiocqhttp_group_888"
     plugin.store.add_balance(key, "1001", 100)
     plugin.store.add_balance(key, "1002", 100)
-    ev = at_event(False, " 19", mention=("1002", "诺里"))
+    ev = at_event(False, " 转账 19", mention=("1002", "诺里"))
     await say(plugin, ev)
     assert plugin.store.get_user(key, "1002")["balance"] == 119
+    assert plugin.store.get_user(key, "1002")["rob_lose"] == 0
 
 
 async def test_bare_at_rob_needs_explicit_word(plugin):

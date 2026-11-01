@@ -405,6 +405,10 @@ _CHAIN_HINT_COOLDOWN = 5.0
 _BOARD_TTL = 1800
 # 弹幕竞猜自动开奖的宽限时间（秒）：到期后先开奖，再保留这段时间供查看结果
 _WAGER_GRACE = 600
+# Boss 战的设计参战人数：血量与赏金都按这个人数设定。
+# 赏金按「实际人数」平分，人数不到这个值时每人分得更少 —— 「一个人单刷」
+# 因此是最慢、收益最低的玩法，这样可以避免战力高的人把 Boss 当成提款机。
+_BOSS_PARTY_TARGET = 3
 
 
 class InteractionPlugin(Star):
@@ -558,21 +562,22 @@ class InteractionPlugin(Star):
     def _parse_bare_at(
         self, event: AstrMessageEvent, text: str
     ) -> tuple[Any, str] | None:
-        """解析「@某人 + 数字」这类没有指令名的裸口令。
+        """解析「@某人 + 动作词 + 数字」这类没有指令名的裸口令。
 
-        场景来自真实群聊：``@诺里 转账 19``、``@诺里 19``、``@诺里 打劫 19``。
+        场景来自真实群聊：``@诺里 转账 19``、``@诺里 打劫 19``。
         这类消息开头是 ``@``，既不是指令名也不是纯数字，历史上会一路掉到
         分发末尾被静默丢掉 —— 用户看到的就是「转账/打劫没法触发」。
 
-        识别规则（宁严勿宽，避免吞掉正常聊天）：
+        识别规则（**必须有动作词**，宁严勿宽）：
 
-        1. 只有消息里**有 @**、且剥掉 ``@`` 片段后只剩「可选动作词 + 数字」时才算；
-        2. 动作词缺省时按**转账**处理 —— 这是可撤回、无损失的那一侧；
-        3. 只有显式写了「打劫 / 抢劫 / 抢 / rob」才走打劫；
-        4. 没有 @ 时不接管（``19`` 这种纯数字可能是对局的输入）。
+        1. 消息里必须真的 @ 了人（以消息链里的 ``At`` 为准）；
+        2. 剥掉 ``@`` 片段后，**第一个 token 必须是动作词**
+           （转账 / 转积分 / pay / transfer / 打劫 / 抢劫 / 抢 / rob）；
+        3. 动作词之后必须恰好剩一个正整数金额。
 
-        目标用户在消息链的 ``At`` 组件里，这里直接写进参数串，handler 的
-        ``_resolve_target`` 会原样解析（比依赖 ``message_str`` 里的昵称可靠）。
+        为什么必须有动作词：v1.4.6 曾把「@某人 + 数字」直接当转账，
+        于是群里 ``@某人 6`` 这种「@ 一下然后随口打个数字」会被真的转出积分。
+        转账是不可撤销的资产操作，**绝不能靠猜**。
 
         Args:
             event: 消息事件（用于判断是否真的 @ 了人）。
@@ -584,24 +589,27 @@ class InteractionPlugin(Star):
         if not self._mentions(event):
             return None
         # 适配器把 ``@某人`` 转成纯文本时会变成 ``@昵称``、``@昵称 1234``，
-        # 也可能只剩一个占位空格甚至完全丢掉 —— 所以不能要求首 token 必须是
-        # ``@``。可靠的信息在消息链里（``_mentions``），文本只用来取金额。
+        # 所以文本里以 ``@`` 开头的 token 一律视为 @ 片段丢弃；
+        # 可靠的目标信息在消息链里（``_mentions``），文本只用来取动作词与金额。
         tokens = [t for t in text.split() if not t.startswith("@")]
-        if len(tokens) < 1:
-            return None
-        rest = tokens
         sender = str(event.get_sender_id())
         targets = [
             uid
             for uid in self._mentions(event)
             if uid != sender and not self._is_bot(event, uid)
         ]
-        handler = self.cmd_transfer
-        if rest[0] in ("转账", "转积分", "pay", "transfer"):
-            rest = rest[1:]
-        elif rest[0] in ("打劫", "抢劫", "rob", "抢"):
-            handler, rest = self.cmd_rob, rest[1:]
-        if len(rest) != 1 or not targets:
+        if not tokens or not targets:
+            return None
+        verb = tokens[0]
+        if verb in ("转账", "转积分", "pay", "transfer"):
+            handler, rest = self.cmd_transfer, tokens[1:]
+        elif verb in ("打劫", "抢劫", "rob", "抢"):
+            handler, rest = self.cmd_rob, tokens[1:]
+        else:
+            # 没有动作词：可能是玩梗、可能是想 @ 人聊天，也可能只是手滑。
+            # 一律不接管 —— 资产操作必须让用户把「转账」两个字说出来。
+            return None
+        if len(rest) != 1:
             return None
         amount = rest[0]
         if not amount.isdigit() or int(amount) <= 0:
@@ -1380,12 +1388,14 @@ class InteractionPlugin(Star):
                 await self._run_command(handler, "", event)
                 return
 
-        # 裸口令：「@某人 19」/「@某人 转账 19」/「@某人 打劫 19」
+        # 裸口令：「@某人 转账 19」/「@某人 打劫 19」
         #
-        # 群里最自然的说法就是把任务 @ 出来再说数，很多人不会写「转账」两个字。
-        # 它不能靠 _dispatch 命中 —— 因为消息开头是 @ 而不是指令名，所以单独
-        # 在免唤醒入口里兜一层。默认按「转账」理解（更安全、可撤回），写明
-        # 「打劫 / 抢」才算抢劫。
+        # 群里常见的说法是「@ 那个人 + 转账 + 金额」，少了指令位置那两个字，
+        # 靠 _dispatch 命中不了 —— 消息开头是 @ 而不是指令名，所以单独在
+        # 免唤醒入口里兜一层。
+        #
+        # **必须写明动作词**：曾经把「@某人 数字」直接当转账，结果群里
+        # 「@某人 6」这种随口 @ 一下就真的把钱转走了。资产操作不能靠猜。
         if self._bool("trigger", "bare_at_action", default=True):
             action = self._parse_bare_at(event, text)
             if action is not None:
@@ -4354,9 +4364,13 @@ class InteractionPlugin(Star):
         lines.append(f"战力 = {formula}")
         lines.append(f"战斗战力 = {battle_formula}")
         lines.append(
-            f"Boss 单次伤害 = 战斗战力 × 浮动(±{games_world.BATTLE_SWING:.0%})"
+            f"Boss 单次伤害 = {games_world.BATTLE_BASE:g} × ln(1 + 战斗战力)"
+            f" × 浮动(±{games_world.BATTLE_SWING:.0%})"
             f" × 克制系数（克制 ×{games_world.BATTLE_COUNTER_UP:g} / "
             f"被克 ×{games_world.BATTLE_COUNTER_DOWN:g}）"
+        )
+        lines.append(
+            "Boss 伤害本身不涨战力（只记击杀次数），以免「伤害涨战力、战力涨伤害」越滚越大。"
         )
         lines.append("PK 胜负按战斗战力比大小，随机扰动，余额不参与。")
         if target != uid:
@@ -4375,7 +4389,8 @@ class InteractionPlugin(Star):
         这是纯战力玩法：不花积分，按战力出伤，克制打法有加成。
 
         Args:
-            args: 可选 Boss 名（史莱姆王 / 烈焰巨龙 / 深海巨妖 / 虚空利维坦）。
+            args: 可选 Boss 名/码/别名，留空则打最弱的史莱姆王。
+                完整名单见 ``games_world.BOSSES`` 与 ``BOSS_ALIASES``。
         """
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
@@ -4391,8 +4406,7 @@ class InteractionPlugin(Star):
         want = (args.strip() or self._args(event).strip()).strip()
         code = self._match_boss(want)
         if want and code is None:
-            names = " / ".join(name for _c, name, *_r in games_world.BOSSES)
-            return event.plain_result(f"没有这个 Boss。可选：{names}")
+            return event.plain_result(self._boss_roster_text("没有这个 Boss。"))
 
         fight = games_world.BossFight.create(
             code or games_world.BOSSES[0][0], int(time.time())
@@ -4402,15 +4416,19 @@ class InteractionPlugin(Star):
         weak = fight.weak_style()
         uid, _n = self._sender(event)
         power = games_plus.battle_power(self.store.get_user(key, uid))
-        cap = games_world.battle_reward(self._boss_pool(fight), {"x": 1}, 1)
+        hit, _mult = games_world.battle_damage(power, fight.code, weak or "", self._rng)
+        party = max(1, self._boss_party_hint(key))
+        cap = games_world.battle_reward(self._boss_pool(fight), {"x": 1}, party)
         return event.plain_result(
             f"🐲 群 Boss 战开始！\n"
             f"{fight.render()}\n"
             f"{desc}\n"
-            f"⚔️ 纯战力玩法：不花积分，伤害 = 你的战斗战力（当前 {power}）。\n"
+            f"⚔️ 纯战力玩法：不花积分，伤害由战斗战力换算（你当前约 {hit} 点）。\n"
             f"发送「攻击」出手；用「攻击 {weak or '强攻'}」打出克制（伤害 ×"
             f"{games_world.BATTLE_COUNTER_UP:g}）。\n"
-            f"击杀后参战者平分赏金，单人最多 {cap} {self._unit}。"
+            f"击杀后由参战者平分赏金：{party} 人时约 {cap} {self._unit}/人。\n"
+            f"⚠️ 赏金按**实际参战人数**平分，人越多每人越少 —— 血条与赏金是按"
+            f" {_BOSS_PARTY_TARGET} 人协作设定的，一个人单刷会打很久且拿得最少。"
         )
 
     def _boss_bounty(self, fight: games_world.BossFight) -> int:
@@ -4426,6 +4444,25 @@ class InteractionPlugin(Star):
         """
         people = max(1, fight.attendance())
         return games_world.battle_reward(self._boss_pool(fight), fight.damages, people)
+
+    def _boss_party_hint(self, key: str) -> int:
+        """预估本群这次会有多少人打 Boss。
+
+        用上一次击杀的参战人数做预估，没有历史则回落到设计人数。
+        纯粹用于开场文案里的「约多少/人」，不影响任何结算。
+
+        Args:
+            key: 会话标识。
+
+        Returns:
+            预估参战人数（至少 1）。
+        """
+        last = self.store.get_meta(key, "boss_last_party", 0)
+        try:
+            people = int(last)
+        except (TypeError, ValueError):
+            people = 0
+        return people if people > 0 else _BOSS_PARTY_TARGET
 
     def _boss_pool(self, fight: games_world.BossFight) -> int:
         """按配置缩放后的击杀赏金总额。
@@ -4494,7 +4531,10 @@ class InteractionPlugin(Star):
             <= games_world.BATTLE_COUNTER_DOWN + 1e-9
         ):
             crit = f"（{style}被克，只能硬啃）"
-        lines = [f"⚔️ @{name} 造成 {dealt} 点伤害{crit}（战力 {power}）"]
+        lines = [
+            f"⚔️ @{name} 造成 {dealt} 点伤害{crit}"
+            f"（战斗战力 {power}，单次伤害按对数刻度换算）"
+        ]
 
         if not killed:
             lines.append(fight.render())
@@ -4510,6 +4550,9 @@ class InteractionPlugin(Star):
         bounty = games_world.battle_reward(
             self._boss_pool(fight), fight.damages, people
         )
+        # 实发值按人记录：转生加成会让不同人拿到不同金额，
+        # 战报里必须报告「你实际拿到多少」，而不是全群统一的基准值。
+        paid: dict[str, int] = {}
         for target_uid in list(fight.damages):
             if fight.damages.get(target_uid, 0) <= 0:
                 continue
@@ -4518,10 +4561,12 @@ class InteractionPlugin(Star):
             if bounty:
                 # 赏金走 _reward：这是收益型奖励，可以吃转生加成；
                 # 加成后仍受「赏金 × 人数 ≤ 奖池 × 上限倍数」约束。
-                record["boss_gold"] = int(record.get("boss_gold", 0) or 0) + (
-                    self._reward(bounty, record, "boss")
-                )
+                gain = self._reward(bounty, record, "boss")
+                record["boss_gold"] = int(record.get("boss_gold", 0) or 0) + gain
+                paid[target_uid] = gain
         self._bosses.pop(key, None)
+        # 记住本场参战人数，供下一场开场文案预估「约多少/人」
+        self.store.set_meta(key, "boss_last_party", people)
 
         tail = self._achievement_scan(self.store.get_user(key, uid))
         lines.append(
@@ -4530,8 +4575,15 @@ class InteractionPlugin(Star):
         )
         lines.append(
             f"你造成 {fight.damages.get(uid, 0)} 点伤害，"
-            f"共 {people} 人参战，每人分得 {bounty} {self._unit}。"
+            f"共 {people} 人参战，你分得 {paid.get(uid, 0)} {self._unit}"
+            f"（基准 {bounty}/人）。"
         )
+        if people > 1:
+            board = sorted(paid.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+            lines.append(
+                "💰 赏金："
+                + "、".join(f"{self.store.display_name(key, u)} {v}" for u, v in board)
+            )
         if tail:
             lines.append(tail.strip())
         await self.store.save(key, force=True)
@@ -4547,8 +4599,7 @@ class InteractionPlugin(Star):
         key = self._session_key(event)
         fight = self._bosses.get(key)
         if fight is None:
-            names = " / ".join(name for _c, name, *_r in games_world.BOSSES)
-            return event.plain_result(f"本群没有进行中的讨伐。\n可选 Boss：{names}")
+            return event.plain_result(self._boss_roster_text("本群没有进行中的讨伐。"))
         lines = [fight.render()]
         if fight.damages:
             rows = sorted(fight.damages.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
@@ -4564,7 +4615,10 @@ class InteractionPlugin(Star):
 
     @staticmethod
     def _match_boss(text: str) -> str | None:
-        """把用户输入的 Boss 名/码匹配到 Boss 码。
+        """把用户输入的 Boss 名/码/别名匹配到 Boss 码。
+
+        匹配优先级：精确命中（码 / 名称 / 别名）→ 子串命中。
+        子串匹配放在最后，避免「slime」被更长但不相干的词抢先。
 
         Args:
             text: 用户输入。
@@ -4575,13 +4629,42 @@ class InteractionPlugin(Star):
         want = "".join((text or "").split()).lower()
         if not want:
             return None
+        exact: dict[str, str] = {}
         for code, name, *_rest in games_world.BOSSES:
-            if want in (code.lower(), name.lower()):
-                return code
-        for code, name, *_rest in games_world.BOSSES:
-            if want in code.lower() or want in name.lower():
-                return code
+            exact[code.lower()] = code
+            exact[name.lower()] = code
+        for alias, code in games_world.BOSS_ALIASES.items():
+            exact.setdefault(alias.lower(), code)
+        if want in exact:
+            return exact[want]
+        # 子串兜底：长的先比，否则「深海巨妖」会被「海怪」这类短词切走
+        for key in sorted(exact, key=len, reverse=True):
+            if want in key:
+                return exact[key]
         return None
+
+    def _boss_roster_text(self, head: str) -> str:
+        """渲染 Boss 名单（含血量、弱点、赏金与别名）。
+
+        Args:
+            head: 首行提示语。
+
+        Returns:
+            多行文本。
+        """
+        lines = [head, "🐲 可选 Boss（讨伐 <名字>）："]
+        for code, name, hp, _cost, pool, _desc in games_world.BOSSES:
+            weak = games_world.BOSS_WEAKNESS.get(code, "")
+            aliases = [
+                a
+                for a, c in games_world.BOSS_ALIASES.items()
+                if c == code and a != name
+            ]
+            alias_text = f"｜别名 {'/'.join(aliases)}" if aliases else ""
+            lines.append(
+                f"· {name}（{code}）血量 {hp}｜弱点 {weak or '无'}｜赏金 {pool}{alias_text}"
+            )
+        return "\n".join(lines)
 
     @filter.command("赛季", alias={"season", "本季"})
     async def cmd_season(

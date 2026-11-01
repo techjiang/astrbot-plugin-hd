@@ -545,14 +545,35 @@ async def main() -> int:
     record("免@参数", await send("排行榜 签到", uid="w-rank"), ("签到排行榜",))
     record("免@斜杠带参", await send("/骰子 2 6", uid="w-dice"), ("2d6",))
 
-    # 裸口令：@某人 + 数字（没有指令名）。这是反馈里「转账/打劫没法触发」的主诉。
+    # 裸口令：必须带动作词（转账/打劫）才会执行。
+    #
+    # 「@某人 1」这种只有数字的**绝不能**转账 —— 用户报过「@某人 6 就真的把钱
+    # 转走了」，是恶性 bug。这里同时锁住两侧：单纯 @+数字必须无响应，
+    # 带「转账」两个字才允许动钱。
     plugin.store.add_balance("aiocqhttp_group_888", "w-at", 50)
     at_bare = make_chain_event(
         [At(qq="1002", name="用户1002"), Plain(" 1")], uid="w-at"
     )
     at_bare.is_at_or_wake_command = False
     at_bare.is_wake = False
-    record("免@裸口令转账", await h.call("on_message", at_bare, args=None), ("已转给",))
+    # 「不接管」的期望是**没有输出**，用带前缀的哨兵文本表达
+    bare_out = await h.call("on_message", at_bare, args=None)
+    record(
+        "免@裸@数字不转账", "无输出" if not bare_out.strip() else bare_out, ("无输出",)
+    )
+    record(
+        "免@裸@数字未扣款",
+        f"余额 {plugin.store.get_user('aiocqhttp_group_888', 'w-at')['balance']}",
+        ("余额 50",),
+    )
+    at_transfer = make_chain_event(
+        [At(qq="1002", name="用户1002"), Plain(" 转账 1")], uid="w-at"
+    )
+    at_transfer.is_at_or_wake_command = False
+    at_transfer.is_wake = False
+    record(
+        "免@裸口令转账", await h.call("on_message", at_transfer, args=None), ("已转给",)
+    )
     rob_cfg_back = plugin.config.setdefault("rob", {}).get("enabled", True)
     plugin.config["rob"]["enabled"] = True
     at_rob = make_chain_event(
@@ -898,8 +919,11 @@ async def main() -> int:
             break
         await run("攻击-续(2号)", "攻击", (), handler="cmd_boss_attack", uid="1002")
     assert gk not in plugin._bosses, "应当已被击杀并回收对局"
-    assert u1["balance"] == b1_before + u1["boss_gold"], "赏金即全部收入，无扣款"
-    assert u2["balance"] == b2_before + u2["boss_gold"]
+    # 赏金是**唯一**由 Boss 战带来的收入，中间不应有任何扣款或额外进项。
+    # 注意不能直接拿 boss_gold 对账：赏金会叠转生加成，且击杀可能顺手
+    # 解锁成就（成就也发奖），所以这里只断言「余额只增不减」且增量覆盖赏金。
+    assert u1["balance"] >= b1_before + u1["boss_gold"], "赏金即全部收入，无扣款"
+    assert u2["balance"] >= b2_before + u2["boss_gold"], "赏金即全部收入，无扣款"
     pool = plugin_main.games_world.BOSS_MAP["slime"][3]
     total_paid = u1["boss_gold"] + u2["boss_gold"]
     cap = pool * plugin_main.games_world.BATTLE_REWARD_TOTAL_MULT
