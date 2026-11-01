@@ -137,9 +137,150 @@ def boss_share(damages: dict[str, int], pool: int) -> dict[str, int]:
     return result
 
 
+# --------------------------------------------------------------------- 战力战斗（v1.4.6）
+
+# 战斗模型：**不花积分，只看战力**。
+#
+# 老模型是「投入积分换伤害」：Boss 血量 1200，奖池只有 700，全群合力打完
+# 必然净亏 500。对玩家来说这是「先交钱、再按贡献分回一部分」，投入产出完全
+# 不成正比，没人愿意碰。更根本的问题是它和已有的「战力」体系毫无关联。
+#
+# 新模型把 Boss 战变成「战力 → 伤害」的纯战力玩法：
+#
+#   单次伤害 = 战力 × 浮动(±BATTLE_SWING) × 克制系数
+#
+# - 不扣任何积分，参战成本为零，缺勤才有成本（Boss 会回血）；
+# - 战力越高伤害越高，战力第一次有了实际用途；
+# - 克制系数让「选对 Boss 上」有意义，而不是无脑刷；
+# - 击杀后全群发放赏金 + 每人记一次击杀功勋（战力来源之一）。
+#
+# 经济上唯一需要守住的约束是「发放 ≤ 上限」，见 :func:`battle_reward`。
+
+# 单次攻击的战力浮动区间（上下各 15%），让同一场里也有悬念
+BATTLE_SWING = 0.15
+# 克制系数：用对打法伤害提升，用错略微衰减（平均仍是 1.0，不额外送钱）
+BATTLE_COUNTER_UP = 1.3
+BATTLE_COUNTER_DOWN = 0.85
+# 每位参与者能领到的赏金占「击杀赏金」的比例上限，以及全场总发放的倍数上限。
+# 这两个上限保证「赏金 × 参战人数」不会超过一次击杀应得的总量。
+BATTLE_REWARD_SHARE = 0.25
+BATTLE_REWARD_TOTAL_MULT = 2.0
+# 战力一次攻击至少造成 1 点伤害，避免新号完全打不动
+BATTLE_MIN_HIT = 1
+
+# 打法（克制）与 Boss 的对应关系：``打法 -> 克制的 Boss 码``。
+# 玩家用「攻击 强攻」指定打法，命中克制关系时伤害 ×1.3。
+BATTLE_STYLES: tuple[tuple[str, str, str], ...] = (
+    ("强攻", "burst", "slime"),
+    ("poke", "poke", "kraken"),
+    ("breach", "破甲", "dragon"),
+    ("seal", "封印", "leviathan"),
+)
+
+# Boss → 打法 的默认最优解，用来自动推荐
+BOSS_WEAKNESS: dict[str, str] = {
+    "slime": "强攻",
+    "dragon": "破甲",
+    "kraken": "消耗",
+    "leviathan": "封印",
+}
+
+
+def battle_style(text: str) -> str:
+    """把玩家输入的写法归一成标准打法名。
+
+    Args:
+        text: 用户输入（可为空）。
+
+    Returns:
+        标准打法名（强攻 / 消耗 / 破甲 / 封印），无法识别时返回空串。
+    """
+    want = "".join((text or "").split()).lower()
+    if not want:
+        return ""
+    for name, code, _counter in BATTLE_STYLES:
+        if want in (name, code):
+            return name
+    return ""
+
+
+def battle_counter_multiplier(style: str, boss_code: str) -> float:
+    """计算打法对 Boss 的克制系数。
+
+    Args:
+        style: 打法名（空串表示随便打）。
+        boss_code: Boss 码。
+
+    Returns:
+        克制系数：克制 1.3、被克 0.85、其余 1.0。
+    """
+    if not style:
+        return 1.0
+    weak = BOSS_WEAKNESS.get(boss_code, "")
+    if not weak:
+        return 1.0
+    if style == weak:
+        return BATTLE_COUNTER_UP
+    if style == BOSS_WEAKNESS.get(weak, ""):
+        return BATTLE_COUNTER_DOWN
+    # 非克制也非被克：仍按 1.0 结算，避免「随便打」变成惩罚性玩法
+    return 1.0
+
+
+def battle_damage(
+    power: int,
+    boss_code: str,
+    style: str = "",
+    rng: random.Random | None = None,
+) -> tuple[int, float]:
+    """按战力计算一次攻击的伤害。
+
+    Args:
+        power: 玩家战力（由 ``games_plus.power_of`` 算出）。
+        boss_code: Boss 码。
+        style: 打法名，空串表示不指定。
+        rng: 随机源。
+
+    Returns:
+        ``(伤害, 本次实际使用的倍率)``。
+    """
+    rng = rng or random
+    base = max(0, _safe_int(power, 0))
+    swing = 1.0 + rng.uniform(-BATTLE_SWING, BATTLE_SWING)
+    multiplier = swing * battle_counter_multiplier(style, boss_code)
+    damage = int(base * multiplier)
+    # 战力为 0 的新号也至少打 1 点，不然「参战」这件事就毫无意义
+    return max(BATTLE_MIN_HIT, damage), multiplier
+
+
+def battle_reward(pool: int, damages: dict[str, int], people: int) -> int:
+    """计算一次击杀后**每位参与者**可领的赏金。
+
+    赏金是这次击杀唯一会「凭空产生」的积分，所以必须收敛：既不能让伤害榜
+    变成印钞机（一次击杀发几千），也不能让几十人围观时单人白拿全额。
+
+    Args:
+        pool: Boss 模板里配置的击杀赏金。
+        damages: ``{用户: 累计伤害}``，用于按贡献决定谁有资格拿。
+        people: 本次赏金实际发放人数。
+
+    Returns:
+        每人赏金；无人参战时返回 0。
+    """
+    total_pool = max(0, _safe_int(pool, 0))
+    count = max(0, _safe_int(people, 0))
+    active = sum(1 for v in damages.values() if _safe_int(v, 0) > 0)
+    if total_pool <= 0 or count <= 0 or active <= 0:
+        return 0
+    per_person_cap = int(total_pool * BATTLE_REWARD_SHARE)
+    total_cap = int(total_pool * BATTLE_REWARD_TOTAL_MULT)
+    per_person = min(per_person_cap, total_cap // count)
+    return max(0, per_person)
+
+
 @dataclass
 class BossFight:
-    """一局群 Boss 战。
+    """一局群 Boss 战（纯战力玩法，不消耗积分）。
 
     Attributes:
         code: Boss 码。
@@ -147,23 +288,27 @@ class BossFight:
         hp_max: 总血量。
         hp: 剩余血量。
         damages: ``{用户: 累计伤害}``。
-        spenders: ``{用户: 累计投入积分}``，用于回报「你投入了多少」。
+        attacks: ``{用户: 出手次数}``，用于展示活跃度。
+        pool: 击杀赏金。
         started_at: 开始时间戳。
         finished: 是否已结束。
         killed_by: 最后一击的玩家（未击杀为空）。
+        styles: ``{用户: 最近一次使用的打法}``，用于战报点出「克制」。
     """
 
     code: str
     name: str
     hp_max: int
     hp: int
-    cost: int = 1
+    # cost 仅为兼容旧存档保留：新模型不扣积分，恒为 0
+    cost: int = 0
     pool: int = 0
     damages: dict[str, int] = field(default_factory=dict)
-    spenders: dict[str, int] = field(default_factory=dict)
+    attacks: dict[str, int] = field(default_factory=dict)
     started_at: int = 0
     finished: bool = False
     killed_by: str = ""
+    styles: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def create(cls, code: str, started_at: int = 0) -> BossFight:
@@ -177,13 +322,13 @@ class BossFight:
             新的对局对象。
         """
         entry = BOSS_MAP.get(code) or BOSS_MAP[BOSSES[0][0]]
-        name, hp, cost, pool, _desc = entry
+        name, hp, _cost, pool, _desc = entry
         return cls(
             code=code if code in BOSS_MAP else BOSSES[0][0],
             name=name,
             hp_max=hp,
             hp=hp,
-            cost=cost,
+            cost=0,
             pool=pool,
             started_at=max(0, _safe_int(started_at, 0)),
         )
@@ -198,29 +343,46 @@ class BossFight:
     @property
     def total_damage(self) -> int:
         """累计总伤害。"""
-        return sum(self.damages.values())
+        return sum(max(0, _safe_int(v, 0)) for v in self.damages.values())
 
-    def attack(self, uid: str, spend: int) -> tuple[int, int, bool]:
-        """对 Boss 发起一次攻击。
+    # 兼容旧字段名：老存档/老测试里用 ``spenders`` 读「投入了多少」，
+    # 新模型里它就是伤害（战力打法没有投入概念）。
+    @property
+    def spenders(self) -> dict[str, int]:
+        """兼容别名：新模型下等于累计伤害。"""
+        return dict(self.damages)
+
+    def attendance(self) -> int:
+        """有效参战人数（伤害 > 0）。"""
+        return sum(1 for v in self.damages.values() if _safe_int(v, 0) > 0)
+
+    def weak_style(self) -> str:
+        """本 Boss 被哪种打法克制。"""
+        return BOSS_WEAKNESS.get(self.code, "")
+
+    def attack(self, uid: str, damage: int, style: str = "") -> tuple[int, int, bool]:
+        """对 Boss 发起一次攻击（伤害由调用方按战力算好）。
 
         Args:
             uid: 用户 ID。
-            spend: 投入积分（由调用方先行扣除）。
+            damage: 本次伤害。
+            style: 本次使用的打法。
 
         Returns:
             ``(实际伤害, 剩余血量, 是否本次击杀)``；对局已结束时返回 ``(0, hp, False)``。
         """
         if self.finished:
             return 0, self.hp, False
-        damage = boss_damage(spend, self.cost)
-        if damage <= 0:
+        want = max(0, _safe_int(damage, 0))
+        if want <= 0:
             return 0, self.hp, False
-        dealt = min(damage, self.hp)
-        # 记录**实际打出**的伤害而不是请求值：Boss 只剩最后一点血时，
-        # 请求 1500 点却只能打出 700 点，若按请求值记功，
-        # 贡献占比与「你投入了多少」都会虚高，还会误导玩家以为被多扣了。
+        dealt = min(want, self.hp)
+        # 记**实际打出**的伤害：Boss 只剩最后一点血时，请求 300 点却只能打出
+        # 20 点，若按请求值记功，贡献占比会虚高。
         self.damages[uid] = self.damages.get(uid, 0) + dealt
-        self.spenders[uid] = self.spenders.get(uid, 0) + dealt * max(1, self.cost)
+        self.attacks[uid] = self.attacks.get(uid, 0) + 1
+        if style:
+            self.styles[uid] = style
         self.hp -= dealt
         if self.hp <= 0:
             self.hp = 0
@@ -230,7 +392,7 @@ class BossFight:
         return dealt, self.hp, False
 
     def settle(self) -> tuple[dict[str, int], str]:
-        """结算奖池。
+        """结算赏金。
 
         Returns:
             ``({用户: 分得积分}, 击杀者)``；未击杀时返回空字典。
@@ -243,13 +405,15 @@ class BossFight:
         """渲染对局进度。
 
         Returns:
-            形如 ``🐲 烈焰巨龙 Lv.1 62% [██████░░░░] 2280/6000`` 的文本。
+            形如 ``🐲 烈焰巨龙 62% [██████░░░░] 2280/6000（弱点：破甲）`` 的文本。
         """
         from .games import bar
 
+        weak = self.weak_style()
+        tail = f"（弱点：{weak}）" if weak else ""
         return (
             f"🐲 {self.name} {self.progress}% "
-            f"{bar(self.hp_max - self.hp, self.hp_max)} {self.hp}/{self.hp_max}"
+            f"{bar(self.hp_max - self.hp, self.hp_max)} {self.hp}/{self.hp_max}{tail}"
         )
 
 

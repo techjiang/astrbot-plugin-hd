@@ -1363,29 +1363,55 @@ POWER_FACTORS: tuple[tuple[str, str, float], ...] = (
 )
 
 
-def power_breakdown(user: dict) -> list[tuple[str, int, float, int]]:
+def power_breakdown(
+    user: dict, with_balance: bool = True
+) -> list[tuple[str, int, float, int, str]]:
     """拆解战力构成。
+
+    Args:
+        user: 用户档案。
+        with_balance: 是否把「积分余额」计入。战斗口径传 ``False``，
+            因为它不允许转账随时改命。
+
+    Returns:
+        ``[(字段名, 展示名, 原始值, 系数, 贡献值), ...]``，只保留有贡献的项。
+    """
+    rows: list[tuple[str, int, float, int, str]] = []
+    for field_name, label, factor in POWER_FACTORS:
+        if field_name == "balance" and not with_balance:
+            continue
+        value = max(0, _safe_int(user.get(field_name, 0), 0))
+        if value <= 0:
+            continue
+        rows.append((field_name, label, value, factor, int(value * factor)))
+    return rows
+
+
+def battle_power(user: dict) -> int:
+    """战斗时使用的**纯战力**：剔除可随时转走的积分余额。
+
+    展示用战力（:func:`power_of`）包含 ``balance``，这合理 —— 它衡量的是
+    「这个人在本群的厚度」。但拿它当战斗数值就有问题：PK / Boss 战的胜负
+    取决于谁的余额高，等于「谁的钱包鼓谁赢」，和签到、对局、Boss 这些
+    真正打出来的东西毫无关系，转账一笔就能瞬间改命。
+
+    所以战斗一律用这个「资产中立」的口径：只算行为累计，不算余额。
+    两个口径都能在 ``战力`` 指令里看到，公式也是公开的。
 
     Args:
         user: 用户档案。
 
     Returns:
-        ``[(展示名, 原始值, 系数, 贡献值), ...]``，只保留有贡献的项。
+        战斗战力整数。
     """
-    rows: list[tuple[str, int, float, int]] = []
-    for field_name, label, factor in POWER_FACTORS:
-        value = max(0, _safe_int(user.get(field_name, 0), 0))
-        if value <= 0:
-            continue
-        rows.append((label, value, factor, int(value * factor)))
-    return rows
+    return sum(contribution for *_rest, contribution in power_breakdown(user, False))
 
 
 def power_of(user: dict) -> int:
     """计算战力总分。
 
-    战力是「活跃度 + 资产」的加权和，不参与任何结算，
-    只用于展示与排行，因此不做上限收敛。
+    战力是「活跃度 + 资产」的加权和。展示用，不做上限收敛；
+    真正参与战斗判定的请用 :func:`battle_power`（资产中立口径）。
 
     Args:
         user: 用户档案。
@@ -1393,6 +1419,4 @@ def power_of(user: dict) -> int:
     Returns:
         战力整数。
     """
-    return sum(
-        contribution for _label, _value, _f, contribution in power_breakdown(user)
-    )
+    return sum(contribution for *_rest, contribution in power_breakdown(user))

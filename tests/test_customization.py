@@ -362,7 +362,8 @@ class TestPower:
             "boss_damage": 300,
         }
         rows = games_plus.power_breakdown(user)
-        assert sum(row[3] for row in rows) == games_plus.power_of(user)
+        # 行结构：(字段名, 展示名, 原始值, 系数, 贡献值)
+        assert sum(row[4] for row in rows) == games_plus.power_of(user)
 
     def test_zero_user_has_zero_power(self):
         assert games_plus.power_of({}) == 0
@@ -375,7 +376,7 @@ class TestPower:
         out = await run(plugin, "cmd_power", make_event("战力"))
         assert "战力" in out
         assert "积分余额×1" in out, "必须把公式原样打出来，否则玩家还是看不懂"
-        assert "不参与任何结算" in out
+        assert "战斗战力" in out, "战斗口径（剔除余额）也必须公示"
 
     async def test_power_alias_is_dispatchable(self, plugin):
         assert "战力" in plugin._dispatch
@@ -396,7 +397,7 @@ async def test_guess_reward_advertised_equals_paid(plugin):
         {"min": 1, "max": 100, "max_attempts": 10, "reward": 30}
     )
     start = await run(plugin, "cmd_guess_start", make_event("猜数字"))
-    game = plugin._guesses[KEY]
+    game = plugin._guesses[f"{KEY}:1001"]
     advertised = plugin._guess_reward()
     assert f"猜中得 {advertised}" in start
 
@@ -431,7 +432,7 @@ class TestSeasonGainCoverage:
     async def test_guess_win_counts(self, plugin):
         user = self._fresh(plugin)
         await run(plugin, "cmd_guess_start", make_event("猜数字"))
-        game = plugin._guesses[KEY]
+        game = plugin._guesses[f"{KEY}:1001"]
         await run(plugin, "cmd_guess", make_event(f"猜 {game.target}"))
         assert user["season_gain"] > 0
 
@@ -480,9 +481,15 @@ class TestSeasonGainCoverage:
         assert user["season_gain"] >= 0
 
     async def test_transfer_out_does_not_count_for_payer(self, plugin):
-        """转出去的钱显然是消费，不该出现在付款方的赛季增量里。"""
+        """转账是零和转移：两边的赛季增量都必须纹丝不动。
+
+        老实现只走 ``add_balance``，于是「付款人一分不掉、收款人白涨一笔」，
+        赛季榜成了互相打钱就能刷的工具。
+        """
         user = self._fresh(plugin)
-        self._fresh(plugin, "1002")
+        receiver = self._fresh(plugin, "1002")
         await run(plugin, "cmd_transfer", make_event("转账 1002 100"))
         assert user["season_gain"] == 0
-        assert plugin.store.get_user(KEY, "1002")["season_gain"] == 100
+        assert receiver["season_gain"] == 0
+        # 余额确实转移了，只是不算成绩
+        assert receiver["balance"] == 1100

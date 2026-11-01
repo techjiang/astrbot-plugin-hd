@@ -426,6 +426,25 @@ class InteractionStore:
         user["season_gain"] = max(0, _to_int(user.get("season_gain"), 0)) + delta
         self._mark_dirty(session_key)
 
+    def season_offset(self, session_key: str, user_id: str, amount: int) -> None:
+        """按变化量修正赛季增量（可为负）。
+
+        ``add_balance`` / ``credit_gain`` 只记「净增」，适合收益型玩法；
+        但转账、打劫、PK 是**零和转移**，双方的赛季成绩必须同步冲销，
+        否则「收款人白涨成绩、付款人纹丝不动」，赛季榜就成了刷分工具。
+
+        Args:
+            session_key: 会话标识。
+            user_id: 用户 ID。
+            amount: 变化量，正数增加、负数减少。
+        """
+        delta = int(amount)
+        if delta == 0:
+            return
+        user = self.get_user(session_key, user_id)
+        user["season_gain"] = max(0, _to_int(user.get("season_gain"), 0) + delta)
+        self._mark_dirty(session_key)
+
     def transfer(
         self, session_key: str, src: str, dst: str, amount: int
     ) -> tuple[bool, str]:
@@ -447,10 +466,13 @@ class InteractionStore:
         payer = self.get_user(session_key, src)
         if _to_int(payer["balance"], 0) < amount:
             return False, f"余额不足，当前只有 {payer['balance']}。"
-        # 走 add_balance 而不是直接改 balance：赛季增量等派生统计
-        # 只在 add_balance 里维护，绕过它会让收款人「白得积分却不算成绩」。
+        # 转账是**零和转移**，不能产出赛季成绩：只走 add_balance 会让收款人
+        # 白涨一笔本季成绩，赛季榜就成了互相打钱就能刷的工具。
         self.add_balance(session_key, src, -amount)
         self.add_balance(session_key, dst, amount)
+        # 只「撤销收款方的收入」，付款方一侧不动：赛季增量只统计净增，
+        # 转出去属于消费，本来就没记过分（消费不倒扣成绩）。
+        self.season_offset(session_key, dst, -amount)
         return True, "ok"
 
     def top_users(

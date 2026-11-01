@@ -246,7 +246,7 @@ def test_render_options_wraps():
 async def test_guess_number_accepts_prefixed_guess(plugin):
     """「猜 50」必须被进行中的对局接管，而不是静默丢弃。"""
     await say(plugin, at_event(False, "猜数字"))
-    game = plugin._guesses["aiocqhttp_group_888"]
+    game = plugin._guesses["aiocqhttp_group_888:1001"]
     out = await say(plugin, at_event(False, f"猜 {game.target}"))
     assert "猜中了" in out
 
@@ -261,3 +261,59 @@ async def test_guess_prefixed_without_game_hints(plugin):
     """没有对局时，「猜 50」也要给出明确提示，而不是石沉大海。"""
     out = await say(plugin, at_event(False, "猜 50"))
     assert "猜数字" in out
+
+
+# --------------------------------------------------- 裸口令（无指令名）
+#
+# 真实群聊里最常见的写法是「@某人 19」，而不是「转账 @某人 19」。
+# 这类消息首 token 是 @，既不是指令名也不是纯数字，历史上会一路掉到
+# 分发末尾被静默丢弃 —— 上报的「转账/打劫没法触发」就是它。
+
+
+async def test_bare_at_transfer(plugin):
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 100)
+    ev = at_event(False, " 19", mention=("1002", "诺里"))
+    out = await say(plugin, ev)
+    assert "已转给" in out
+    assert plugin.store.get_user(key, "1002")["balance"] == 19
+
+
+async def test_bare_at_transfer_with_action_word(plugin):
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 100)
+    ev = at_event(False, " 转账 19", mention=("1002", "诺里"))
+    out = await say(plugin, ev)
+    assert "已转给" in out
+
+
+async def test_bare_at_defaults_to_transfer_not_rob(plugin):
+    """缺省动作按转账处理：它可撤回、不会让对方掉钱。"""
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 100)
+    plugin.store.add_balance(key, "1002", 100)
+    ev = at_event(False, " 19", mention=("1002", "诺里"))
+    await say(plugin, ev)
+    assert plugin.store.get_user(key, "1002")["balance"] == 119
+
+
+async def test_bare_at_rob_needs_explicit_word(plugin):
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 1000)
+    plugin.store.add_balance(key, "1002", 1000)
+    ev = at_event(False, " 打劫 50", mention=("1002", "诺里"))
+    out = await say(plugin, ev)
+    assert "目标" in out
+
+
+async def test_bare_at_without_mention_is_ignored(plugin):
+    """纯数字不能被裸口令吞掉 —— 它可能是对局的输入。"""
+    ev = at_event(False, " 19")
+    assert await say(plugin, ev) == ""
+
+
+async def test_bare_at_does_not_swallow_chat(plugin):
+    """「@某人 你好」这类正常聊天不能被当成转账。"""
+    plugin.store.add_balance("aiocqhttp_group_888", "1001", 100)
+    ev = at_event(False, " 你好", mention=("1002", "诺里"))
+    assert await say(plugin, ev) == ""

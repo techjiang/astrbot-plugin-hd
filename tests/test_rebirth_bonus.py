@@ -202,7 +202,7 @@ async def test_guess_reward_preview_equals_payout(plugin):
     out = await run(plugin, "cmd_guess_start", make_event("猜数字"))
     assert "转生加成后" in out
     announced = int(out.split("转生加成后 ")[1].split("）")[0])
-    game = plugin._guesses[KEY]
+    game = plugin._guesses[f"{KEY}:1001"]
     before = delta(plugin)
     await plugin._guess_once(make_event(f"猜 {game.target}"), game.target)
     assert delta(plugin) - before == announced

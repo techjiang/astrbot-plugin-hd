@@ -1163,20 +1163,21 @@
   "boss": {
     "description": "群 Boss 战",
     "type": "object",
-    "hint": "全群协作击败 Boss，按伤害占比瓜分奖池。奖池总额小于全员总投入，不存在刷分空间。",
+    "hint": "纯战力玩法：不消耗积分，伤害由战力与克制打法决定。击杀后全群参战者按人数分赏金（有上限，不会凭空多造积分）。",
     "items": {
       "enabled": {
         "description": "启用群 Boss 战",
         "type": "bool",
         "default": true
       },
-      "max_spend": {
-        "description": "单次攻击投入上限",
+      "bounty_scale": {
+        "description": "赏金缩放（%）",
         "type": "int",
-        "default": 5000,
+        "default": 100,
+        "hint": "在 Boss 模板赏金基础上整体缩放。100 为默认，调高会更快积累积分。",
         "slider": {
-          "min": 10,
-          "max": 100000,
+          "min": 0,
+          "max": 300,
           "step": 10
         }
       }

@@ -436,6 +436,7 @@ class InteractionPlugin(Star):
             else games_plus.REBIRTH_BONUS_PER_LEVEL
         )
         self.store = InteractionStore(resolve_data_dir())
+        # 猜数字同样按「会话:发起人」存；接龙天然是多人轮流，仍按会话
         self._guesses: dict[str, GuessGame] = {}
         self._chains: dict[str, ChainGame] = {}
         self._cooldown: dict[str, float] = {}
@@ -456,7 +457,10 @@ class InteractionPlugin(Star):
         self._last_rules_signature: str | None = None
         # 免唤醒分发表：归一化指令名 -> 处理协程
         self._dispatch: dict[str, Any] = {}
-        # 扩展玩法状态（按会话隔离）
+        # 扩展玩法状态（按「会话:发起人」隔离）
+        # 一个人开的局归一个人：同一个群里多人可以各开一桌，谁也不能替别人
+        # 要牌 / 停牌 / 猜数字。历史上这些状态只按会话存，于是「我开了 21 点，
+        # 别人一句『要牌』就把我的局结算了」。
         self._blackjack: dict[str, games_extra.BlackjackGame] = {}
         self._bombs: dict[str, games_extra.BombGame] = {}
         self._riddles: dict[str, dict[str, Any]] = {}
@@ -498,6 +502,111 @@ class InteractionPlugin(Star):
         if hasattr(self, "store"):
             await self.store.close()
         logger.info("[互动] 插件已卸载，数据已保存。")
+
+    # ------------------------------------------------------------------ 对局归属
+
+    def _owner_key(self, event: AstrMessageEvent) -> str:
+        """返回「当前会话 + 当前发起人」的对局键。
+
+        单人玩法（猜数字 / 21 点 / 数字炸弹）必须按人隔离：否则同群任何人
+        的一句「猜 50」「要牌」都会作用到别人开的局上。
+
+        Args:
+            event: 消息事件。
+
+        Returns:
+            形如 ``aiocqhttp_group_888:1001`` 的键。
+        """
+        return f"{self._session_key(event)}:{event.get_sender_id()}"
+
+    def _pick_game(
+        self,
+        store: dict[str, Any],
+        event: AstrMessageEvent,
+        accept: Any = None,
+    ) -> Any | None:
+        """在「按人开桌」的状态表里挑出本条消息应该作用的对局。
+
+        **只认自己开的局**。别人开的局一律不碰 —— 这是上报缺陷的核心：
+        「我开了 21 点，别人一句『要牌』就把我的局结算了」。
+        同群多人各开一桌互不干扰。
+
+        Args:
+            store: 状态表（键为 ``会话:发起人``）。
+            event: 消息事件。
+            accept: 可选过滤函数，``accept(game) -> bool``。
+
+        Returns:
+            命中的对局；没有则返回 ``None``。
+        """
+        own = store.get(self._owner_key(event))
+        if own is None:
+            return None
+        return own if accept is None or accept(own) else None
+
+    def _owner_of(self, key: str) -> str:
+        """从对局键 ``会话:发起人`` 里还原发起人 ID。
+
+        Args:
+            key: 对局键。
+
+        Returns:
+            发起人 ID；无法解析时返回空串。
+        """
+        return key.rsplit(":", 1)[-1] if ":" in key else ""
+
+    def _parse_bare_at(
+        self, event: AstrMessageEvent, text: str
+    ) -> tuple[Any, str] | None:
+        """解析「@某人 + 数字」这类没有指令名的裸口令。
+
+        场景来自真实群聊：``@诺里 转账 19``、``@诺里 19``、``@诺里 打劫 19``。
+        这类消息开头是 ``@``，既不是指令名也不是纯数字，历史上会一路掉到
+        分发末尾被静默丢掉 —— 用户看到的就是「转账/打劫没法触发」。
+
+        识别规则（宁严勿宽，避免吞掉正常聊天）：
+
+        1. 只有消息里**有 @**、且剥掉 ``@`` 片段后只剩「可选动作词 + 数字」时才算；
+        2. 动作词缺省时按**转账**处理 —— 这是可撤回、无损失的那一侧；
+        3. 只有显式写了「打劫 / 抢劫 / 抢 / rob」才走打劫；
+        4. 没有 @ 时不接管（``19`` 这种纯数字可能是对局的输入）。
+
+        目标用户在消息链的 ``At`` 组件里，这里直接写进参数串，handler 的
+        ``_resolve_target`` 会原样解析（比依赖 ``message_str`` 里的昵称可靠）。
+
+        Args:
+            event: 消息事件（用于判断是否真的 @ 了人）。
+            text: 已归一化的消息文本。
+
+        Returns:
+            ``(处理协程, 参数串)``；不像裸口令时返回 ``None``。
+        """
+        if not self._mentions(event):
+            return None
+        # 适配器把 ``@某人`` 转成纯文本时会变成 ``@昵称``、``@昵称 1234``，
+        # 也可能只剩一个占位空格甚至完全丢掉 —— 所以不能要求首 token 必须是
+        # ``@``。可靠的信息在消息链里（``_mentions``），文本只用来取金额。
+        tokens = [t for t in text.split() if not t.startswith("@")]
+        if len(tokens) < 1:
+            return None
+        rest = tokens
+        sender = str(event.get_sender_id())
+        targets = [
+            uid
+            for uid in self._mentions(event)
+            if uid != sender and not self._is_bot(event, uid)
+        ]
+        handler = self.cmd_transfer
+        if rest[0] in ("转账", "转积分", "pay", "transfer"):
+            rest = rest[1:]
+        elif rest[0] in ("打劫", "抢劫", "rob", "抢"):
+            handler, rest = self.cmd_rob, rest[1:]
+        if len(rest) != 1 or not targets:
+            return None
+        amount = rest[0]
+        if not amount.isdigit() or int(amount) <= 0:
+            return None
+        return handler, f"{targets[0]} {amount}"
 
     # ------------------------------------------------------------------ 配置与工具
 
@@ -1271,6 +1380,19 @@ class InteractionPlugin(Star):
                 await self._run_command(handler, "", event)
                 return
 
+        # 裸口令：「@某人 19」/「@某人 转账 19」/「@某人 打劫 19」
+        #
+        # 群里最自然的说法就是把任务 @ 出来再说数，很多人不会写「转账」两个字。
+        # 它不能靠 _dispatch 命中 —— 因为消息开头是 @ 而不是指令名，所以单独
+        # 在免唤醒入口里兜一层。默认按「转账」理解（更安全、可撤回），写明
+        # 「打劫 / 抢」才算抢劫。
+        if self._bool("trigger", "bare_at_action", default=True):
+            action = self._parse_bare_at(event, text)
+            if action is not None:
+                handler, rest = action
+                await self._run_command(handler, rest, event)
+                return
+
         # 关键词互动
         if self._feature_on("auto_reply", default=False):
             for keyword, reply, exact in self._keyword_rules():
@@ -1344,7 +1466,7 @@ class InteractionPlugin(Star):
                     event.stop_event()
                     await event.send(result)
                     return True
-                if key not in self._guesses:
+                if self._pick_game(self._guesses, event) is None:
                     event.stop_event()
                     await event.send(
                         event.plain_result(
@@ -1384,13 +1506,13 @@ class InteractionPlugin(Star):
                         await event.send(result)
                         return True
 
-            if key in self._guesses:
+            if self._pick_game(self._guesses, event) is not None:
                 result = await self._guess_once(event, int(text))
                 if result is not None:
                     event.stop_event()
                     await event.send(result)
                     return True
-            if key in self._bombs:
+            if self._pick_game(self._bombs, event) is not None:
                 result = await self._bomb_report(event, int(text))
                 if result is not None:
                     event.stop_event()
@@ -1646,7 +1768,9 @@ class InteractionPlugin(Star):
         if amount <= 0:
             return event.plain_result("转账数量必须是不小于 1 的整数。")
         key = self._session_key(event)
-        uid, _ = self._sender(event)
+        uid, name = self._sender(event)
+        payer = self.store.get_user(key, uid)
+        payer["name"] = name
         ok, msg = self.store.transfer(key, uid, target, amount)
         if not ok:
             return event.plain_result(msg)
@@ -1752,7 +1876,7 @@ class InteractionPlugin(Star):
             self._int("guess_number", "max_attempts", default=10),
             rng=self._rng,
         )
-        self._guesses[key] = game
+        self._guesses[self._owner_key(event)] = game
         uid, _name = self._sender(event)
         user = self.store.get_user(key, uid)
         return event.plain_result(
@@ -1796,16 +1920,16 @@ class InteractionPlugin(Star):
             结果；没有进行中的对局时返回 ``None``。
         """
         key = self._session_key(event)
-        game = self._guesses.get(key)
+        game = self._pick_game(self._guesses, event)
         if game is None:
             return None
         if time.time() - game.started_at > GUESS_TTL:
-            self._guesses.pop(key, None)
+            self._guesses.pop(self._owner_key(event), None)
             return event.plain_result("上一局已超时，发送「猜数字」重新开始。")
         uid, name = self._sender(event)
         result, hint = game.guess(number, uid)
         if result in ("win", "lose"):
-            self._guesses.pop(key, None)
+            self._guesses.pop(self._owner_key(event), None)
             if result == "win":
                 user = self.store.get_user(key, uid)
                 user["name"] = name
@@ -2478,7 +2602,7 @@ class InteractionPlugin(Star):
         if not self._feature_on("blackjack"):
             return self._deny("21 点已关闭。")
         key = self._session_key(event)
-        ongoing = self._blackjack.get(key)
+        ongoing = self._blackjack.get(self._owner_key(event))
         if ongoing is not None and not ongoing.finished:
             return event.plain_result(
                 "你还有一局 21 点没结束，先「要牌」或「停牌」吧。"
@@ -2505,7 +2629,7 @@ class InteractionPlugin(Star):
         game = games_extra.BlackjackGame.new(bet, rng=self._rng)
         if game.finished:  # 起手黑杰克，直接结算
             return await self._settle_blackjack(event, key, game, "win")
-        self._blackjack[key] = game
+        self._blackjack[self._owner_key(event)] = game
         await self.store.save(key)
         return event.plain_result(
             f"🃏 21 点开始！下注 {bet} {self._unit}\n"
@@ -2538,8 +2662,8 @@ class InteractionPlugin(Star):
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
-        game = self._blackjack.get(key)
-        if game is None or game.finished:
+        game = self._pick_game(self._blackjack, event, lambda g: not g.finished)
+        if game is None:
             return event.plain_result("当前没有进行中的 21 点，发送「21点」开一局吧。")
         outcome = game.hit(rng=self._rng)
         if outcome == "continue":
@@ -2547,7 +2671,7 @@ class InteractionPlugin(Star):
                 f"🃏 抽到新牌，你的手牌：{self._cards(game.player)}"
                 f"（{game.player_value()} 点）\n继续「要牌」或「停牌」。"
             )
-        self._blackjack.pop(key, None)
+        self._blackjack.pop(self._owner_key(event), None)
         return await self._settle_blackjack(event, key, game, outcome)
 
     @filter.command("停牌", alias={"stand", "不玩了"})
@@ -2558,10 +2682,10 @@ class InteractionPlugin(Star):
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
-        game = self._blackjack.get(key)
-        if game is None or game.finished:
+        game = self._pick_game(self._blackjack, event, lambda g: not g.finished)
+        if game is None:
             return event.plain_result("当前没有进行中的 21 点，发送「21点」开一局吧。")
-        self._blackjack.pop(key, None)
+        self._blackjack.pop(self._owner_key(event), None)
         return await self._settle_blackjack(event, key, game, game.stand(rng=self._rng))
 
     async def _settle_blackjack(
@@ -2630,9 +2754,8 @@ class InteractionPlugin(Star):
         if len(nums) >= 2:
             lo, hi = nums[0], nums[1]
         lo, hi = games.normalize_range(lo, hi, min_span=10)
-        key = self._session_key(event)
         game = games_extra.BombGame.new(lo, hi, rng=self._rng)
-        self._bombs[key] = game
+        self._bombs[self._owner_key(event)] = game
         return event.plain_result(
             f"💣 数字炸弹已埋好！范围 {game.low} ~ {game.high - 1}。\n"
             f"大家轮流直接发数字，踩中炸弹的人会被扣分哦。"
@@ -2653,19 +2776,19 @@ class InteractionPlugin(Star):
         if not self._feature_on("bomb"):
             return None
         key = self._session_key(event)
-        game = self._bombs.get(key)
+        game = self._pick_game(self._bombs, event)
         if game is None:
             return None
         timeout = self._int("bomb", "timeout_seconds", default=180)
         if time.time() - game.started_at > timeout:
-            self._bombs.pop(key, None)
+            self._bombs.pop(self._owner_key(event), None)
             return None
         uid, name = self._sender(event)
         boom, msg = game.report(value, uid)
         user = self.store.get_user(key, uid)
         user["name"] = name
         if boom:
-            self._bombs.pop(key, None)
+            self._bombs.pop(self._owner_key(event), None)
             punish = max(0, self._int("bomb", "punish", default=10))
             user["balance"] = max(0, int(user.get("balance", 0) or 0) - punish)
             await self.store.save(key, force=True)
@@ -3258,21 +3381,27 @@ class InteractionPlugin(Star):
         b = self.store.get_user(key, target)
         if stake > 0 and (int(a["balance"]) < stake or int(b["balance"]) < stake):
             return event.plain_result(f"双方都需要至少 {stake} {self._unit} 才能开打。")
-        winner, diff, flavor = games_extra.duel(a, b, self._rng)
+        # 胜负按**战斗战力**（剔除余额）判定：拿余额当战力等于「谁钱包鼓谁赢」，
+        # 转账一笔就能改命，签到和对局积累的东西毫无意义。
+        pa = games_plus.battle_power(a)
+        pb = games_plus.battle_power(b)
+        winner, diff, flavor = games_extra.duel_by_power(pa, pb, self._rng)
         other = self.store.display_name(key, target)
         if winner == "a":
             a["duel_win"] = int(a.get("duel_win", 0) or 0) + 1
-            self._grant(a, stake)  # 零和转移
-            b["balance"] = max(0, int(b["balance"]) - stake)
-            line = f"⚔️ {name} 战胜了 {other}（战力差 {diff}）！{flavor}"
+            line = f"⚔️ {name} 战胜了 {other}（战斗战力 {pa} vs {pb}）！{flavor}"
         elif winner == "b":
             b["duel_win"] = int(b.get("duel_win", 0) or 0) + 1
-            self._grant(b, stake)  # 零和转移
-            a["balance"] = max(0, int(a["balance"]) - stake)
-            line = f"⚔️ {other} 战胜了 {name}（战力差 {diff}）！{flavor}"
+            line = f"⚔️ {other} 战胜了 {name}（战斗战力 {pb} vs {pa}）！{flavor}"
         else:
-            line = f"⚔️ {name} 与 {other} 打成平手（战力差 {diff}）！{flavor}"
-        if stake > 0 and winner != "draw":
+            line = f"⚔️ {name} 与 {other} 打成平手（战斗战力 {pa} vs {pb}）！{flavor}"
+        if stake > 0 and winner in ("a", "b"):
+            # 零和转移：赢家拿走赌注，输家赔掉赌注，两边赛季增量同步冲销
+            loser_uid = target if winner == "a" else uid
+            self.store.add_balance(key, uid if winner == "a" else target, stake)
+            self.store.add_balance(key, loser_uid, -stake)
+            self.store.season_offset(key, uid if winner == "a" else target, stake)
+            self.store.season_offset(key, loser_uid, -stake)
             line += f"\n赌注 {stake} {self._unit} 已结算。"
         per = max(1, self._int("social", "intimacy_per_interact", default=2))
         bucket = a.setdefault("intimacy", {})
@@ -4188,7 +4317,7 @@ class InteractionPlugin(Star):
     async def cmd_power(
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
-        """查看战力与计算公式（可 @ 他人）。"""
+        """查看战力、战斗战力与完整计算公式（可 @ 他人）。"""
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
         key = self._session_key(event)
@@ -4197,21 +4326,39 @@ class InteractionPlugin(Star):
         uid, _self_name = self._sender(event)
         user = self.store.get_user(key, target)
         name = self.store.display_name(key, target)
-        rows = games_plus.power_breakdown(user)
         total = games_plus.power_of(user)
-        lines = [f"⚔️ {name} 的战力：{total}"]
+        battle = games_plus.battle_power(user)
+        lines = [
+            f"⚔️ {name} 的战力：{total}",
+            f"🗡️ 战斗战力：{battle}（战力 − 积分余额，PK / Boss 战用这个）",
+            "",
+            "📐 战力构成",
+        ]
+        rows = games_plus.power_breakdown(user)
         if rows:
-            for label, value, factor, contribution in rows:
-                lines.append(f"· {label} {value} × {factor:g} = {contribution}")
+            for field_name, label, value, factor, contribution in rows:
+                mark = "" if field_name != "balance" else "（不计入战斗）"
+                lines.append(f"· {label} {value} × {factor:g} = {contribution}{mark}")
         else:
             lines.append("· 还没有任何战力来源，先签到攒起来吧。")
         lines.append("")
-        lines.append("📐 战力公式（全部系数公开，见下）")
+        lines.append("📐 计算公式")
         formula = " + ".join(
             f"{label}×{factor:g}" for _field, label, factor in games_plus.POWER_FACTORS
         )
-        lines.append(formula)
-        lines.append("战力只用于展示与对比，不参与任何结算，不会影响你挣多少。")
+        battle_formula = " + ".join(
+            f"{label}×{factor:g}"
+            for field, label, factor in games_plus.POWER_FACTORS
+            if field != "balance"
+        )
+        lines.append(f"战力 = {formula}")
+        lines.append(f"战斗战力 = {battle_formula}")
+        lines.append(
+            f"Boss 单次伤害 = 战斗战力 × 浮动(±{games_world.BATTLE_SWING:.0%})"
+            f" × 克制系数（克制 ×{games_world.BATTLE_COUNTER_UP:g} / "
+            f"被克 ×{games_world.BATTLE_COUNTER_DOWN:g}）"
+        )
+        lines.append("PK 胜负按战斗战力比大小，随机扰动，余额不参与。")
         if target != uid:
             lines.append("（「战力 @某人」可查看他人）")
         await self.store.save(key)
@@ -4225,6 +4372,8 @@ class InteractionPlugin(Star):
     ) -> MessageEventResult | None:
         """开一局群 Boss 战，用法：讨伐 [boss名]。
 
+        这是纯战力玩法：不花积分，按战力出伤，克制打法有加成。
+
         Args:
             args: 可选 Boss 名（史莱姆王 / 烈焰巨龙 / 深海巨妖 / 虚空利维坦）。
         """
@@ -4235,11 +4384,9 @@ class InteractionPlugin(Star):
         key = self._session_key(event)
         ongoing = self._bosses.get(key)
         if ongoing is not None and not ongoing.finished:
-            lines = [
-                f"⚠️ 本群已在讨伐「{ongoing.name}」，先打完这一局。",
-                ongoing.render(),
-            ]
-            return event.plain_result("\n".join(lines))
+            return event.plain_result(
+                f"⚠️ 本群已在讨伐「{ongoing.name}」，先打完这一局。\n{ongoing.render()}"
+            )
 
         want = (args.strip() or self._args(event).strip()).strip()
         code = self._match_boss(want)
@@ -4251,26 +4398,65 @@ class InteractionPlugin(Star):
             code or games_world.BOSSES[0][0], int(time.time())
         )
         self._bosses[key] = fight
-        _name, _hp, cost, pool, desc = games_world.BOSS_MAP[fight.code]
+        desc = games_world.BOSS_MAP[fight.code][4]
+        weak = fight.weak_style()
+        uid, _n = self._sender(event)
+        power = games_plus.battle_power(self.store.get_user(key, uid))
+        cap = games_world.battle_reward(self._boss_pool(fight), {"x": 1}, 1)
         return event.plain_result(
             f"🐲 群 Boss 战开始！\n"
             f"{fight.render()}\n"
             f"{desc}\n"
-            f"发送「攻击 <积分>」投入积分造成伤害（每 {cost} 积分 = 1 点伤害）。\n"
-            f"击杀后按伤害占比瓜分 {pool} {self._unit} 奖池。"
+            f"⚔️ 纯战力玩法：不花积分，伤害 = 你的战斗战力（当前 {power}）。\n"
+            f"发送「攻击」出手；用「攻击 {weak or '强攻'}」打出克制（伤害 ×"
+            f"{games_world.BATTLE_COUNTER_UP:g}）。\n"
+            f"击杀后参战者平分赏金，单人最多 {cap} {self._unit}。"
         )
+
+    def _boss_bounty(self, fight: games_world.BossFight) -> int:
+        """预估本场每位参战者能拿到的赏金。
+
+        预告与实发共用 ``battle_reward``，避免出现「说了给 X 实际给 Y」。
+
+        Args:
+            fight: 对局。
+
+        Returns:
+            每人赏金。
+        """
+        people = max(1, fight.attendance())
+        return games_world.battle_reward(self._boss_pool(fight), fight.damages, people)
+
+    def _boss_pool(self, fight: games_world.BossFight) -> int:
+        """按配置缩放后的击杀赏金总额。
+
+        缩放是给管理员的旋钮（想让 Boss 战更值钱就调高），但最终仍受
+        ``battle_reward`` 的「单人上限 / 总额上限」约束。
+
+        Args:
+            fight: 对局。
+
+        Returns:
+            赏金总额。
+        """
+        scale = max(0, min(300, self._int("boss", "bounty_scale", default=100)))
+        return max(0, fight.pool * scale // 100)
 
     @filter.command("攻击", alias={"输出", "砍", "attack"})
     async def cmd_boss_attack(
         self, event: AstrMessageEvent, args: str = ""
     ) -> MessageEventResult | None:
-        """对当前 Boss 发起攻击，用法：攻击 <积分>。
+        """对当前 Boss 出手，用法：攻击 [打法]。
+
+        伤害完全由战力决定，不需要投入积分。
 
         Args:
-            args: 投入积分。
+            args: 可选打法（强攻 / 消耗 / 破甲 / 封印）。
         """
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if not self._feature_on("boss", default=True):
+            return self._deny("群 Boss 战已关闭。")
         key = self._session_key(event)
         fight = self._bosses.get(key)
         if fight is None or fight.finished:
@@ -4280,66 +4466,71 @@ class InteractionPlugin(Star):
         user["name"] = name
 
         raw = (args.strip() or self._args(event).strip()).split()
-        spend = games.parse_amount(raw[0], 0) if raw else 0
-        if spend <= 0:
-            return event.plain_result("投入积分要大于 0，例如「攻击 100」。")
-        cap = max(1, self._int("boss", "max_spend", default=5000))
-        if spend > cap:
-            return event.plain_result(
-                f"单次攻击最多投入 {cap} {self._unit}，别一次梭哈。"
-            )
-        if spend > int(user.get("balance", 0) or 0):
-            return event.plain_result(
-                f"积分不足，你只有 {int(user.get('balance', 0) or 0)} {self._unit}。"
-            )
+        style_raw = raw[0] if raw else ""
+        style = games_world.battle_style(style_raw)
+        if style_raw and not style:
+            styles = " / ".join(n for n, _c, _k in games_world.BATTLE_STYLES)
+            return event.plain_result(f"没有这种打法。可选：{styles}（或直接「攻击」）")
 
-        user["balance"] = int(user.get("balance", 0) or 0) - spend
-        dealt, remaining, killed = fight.attack(uid, spend)
+        power = games_plus.battle_power(user)
+        damage, _multiplier = games_world.battle_damage(
+            power, fight.code, style, self._rng
+        )
+        dealt, remaining, killed = fight.attack(uid, damage, style)
         if dealt <= 0:
-            # 投入不足以折算 1 点伤害：全额退回，不留沉默扣款
-            self._grant(user, spend)  # 伤害折算不足 1 点，全额退回
-            need = max(1, fight.cost)
-            return event.plain_result(f"至少投入 {need} {self._unit} 才能造成伤害。")
-        # 溢出伤害要退款：Boss 只剩 10 滴血时你投入 5000，
-        # 只该按「实际打出的 10 点」收费，否则最后一下会被当冤大头。
-        billed = dealt * max(1, fight.cost)
-        refund = spend - billed
-        if refund > 0:
-            self._grant(user, refund)  # 溢出伤害原路退回
-            spend = billed
-            fight.spenders[uid] = max(0, fight.spenders.get(uid, 0) - refund)
+            return event.plain_result("Boss 已经倒下了，没有可攻击的目标。")
 
         user["boss_damage"] = int(user.get("boss_damage", 0) or 0) + dealt
-        lines = [f"@{name} 造成 {dealt} 点伤害！"]
+        crit = ""
+        if (
+            style
+            and games_world.battle_counter_multiplier(style, fight.code)
+            >= games_world.BATTLE_COUNTER_UP - 1e-9
+        ):
+            crit = f"（{style}克制！×{games_world.BATTLE_COUNTER_UP:g}）"
+        elif (
+            style
+            and games_world.battle_counter_multiplier(style, fight.code)
+            <= games_world.BATTLE_COUNTER_DOWN + 1e-9
+        ):
+            crit = f"（{style}被克，只能硬啃）"
+        lines = [f"⚔️ @{name} 造成 {dealt} 点伤害{crit}（战力 {power}）"]
 
         if not killed:
-            mine = fight.damages.get(uid, 0)
             lines.append(fight.render())
-            lines.append(f"你的累计伤害 {mine}（投入 {fight.spenders.get(uid, 0)}）")
+            lines.append(
+                f"你的累计伤害 {fight.damages.get(uid, 0)}"
+                f"（出手 {fight.attacks.get(uid, 0)} 次）"
+            )
             await self.store.save(key)
             return event.plain_result("\n".join(lines))
 
-        share, killer = fight.settle()
-        mine = share.get(uid, 0)
-        for target_uid, amount in share.items():
-            self.store.add_balance(key, target_uid, amount)
-        # 所有参与者都要记功：只给「最后一击」算账会让先出手的人白打工
-        for target_uid in fight.damages:
+        _share, killer = fight.settle()
+        people = max(1, fight.attendance())
+        bounty = games_world.battle_reward(
+            self._boss_pool(fight), fight.damages, people
+        )
+        for target_uid in list(fight.damages):
+            if fight.damages.get(target_uid, 0) <= 0:
+                continue
             record = self.store.get_user(key, target_uid)
-            record["boss_gold"] = int(record.get("boss_gold", 0) or 0) + share.get(
-                target_uid, 0
-            )
-            if target_uid == killer:
-                record["boss_kill"] = int(record.get("boss_kill", 0) or 0) + 1
+            record["boss_kill"] = int(record.get("boss_kill", 0) or 0) + 1
+            if bounty:
+                # 赏金走 _reward：这是收益型奖励，可以吃转生加成；
+                # 加成后仍受「赏金 × 人数 ≤ 奖池 × 上限倍数」约束。
+                record["boss_gold"] = int(record.get("boss_gold", 0) or 0) + (
+                    self._reward(bounty, record, "boss")
+                )
         self._bosses.pop(key, None)
 
-        # 全员结算后逐人复查成就，避免「只给补刀的人算账」
         tail = self._achievement_scan(self.store.get_user(key, uid))
         lines.append(
-            f"💥 {fight.name} 被击败了！最后一击：{self.store.display_name(key, killer)}"
+            f"💥 {fight.name} 被击败了！最后一击："
+            f"{self.store.display_name(key, killer)}"
         )
         lines.append(
-            f"你分得 {mine} {self._unit}（伤害占比 {fight.damages.get(uid, 0)}/{fight.total_damage}）"
+            f"你造成 {fight.damages.get(uid, 0)} 点伤害，"
+            f"共 {people} 人参战，每人分得 {bounty} {self._unit}。"
         )
         if tail:
             lines.append(tail.strip())
@@ -4363,9 +4554,12 @@ class InteractionPlugin(Star):
             rows = sorted(fight.damages.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
             lines.append("📊 伤害榜：")
             for uid, damage in rows:
-                lines.append(f"· {self.store.display_name(key, uid)} —— {damage}")
+                lines.append(
+                    f"· {self.store.display_name(key, uid)} —— {damage}"
+                    f"（{fight.attacks.get(uid, 0)} 次）"
+                )
         else:
-            lines.append("还没人出手，发送「攻击 <积分>」上啊！")
+            lines.append("还没人出手，发送「攻击」上啊！")
         return event.plain_result("\n".join(lines))
 
     @staticmethod

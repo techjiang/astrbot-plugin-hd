@@ -108,7 +108,7 @@ DEFAULT_CONFIG = {
         "gift_intimacy": 5,
         "duel_stake": 20,
     },
-    "boss": {"enabled": True, "max_spend": 5000},
+    "boss": {"enabled": True, "bounty_scale": 100},
     "season": {"enabled": True},
     "pet": {"enabled": True},
     "achievements": {"enabled": True},
@@ -268,7 +268,7 @@ async def test_lottery_and_balance_consistency(plugin):
 @pytest.mark.asyncio
 async def test_guess_flow(plugin):
     await run(plugin, "cmd_guess_start", make_event("猜数字"))
-    game = plugin._guesses["aiocqhttp_group_888"]
+    game = plugin._guesses["aiocqhttp_group_888:1001"]
     assert "猜中了" in await run(
         plugin, "cmd_guess", make_event("猜"), args=str(game.target)
     )
@@ -666,7 +666,7 @@ def test_resolve_uid_variants(plugin):
 @pytest.mark.asyncio
 async def test_auto_game_guess_plain_number(plugin):
     await run(plugin, "cmd_guess_start", make_event("猜数字"))
-    game = plugin._guesses["aiocqhttp_group_888"]
+    game = plugin._guesses["aiocqhttp_group_888:1001"]
     out = await run(plugin, "on_message", make_event(str(game.target)))
     assert "猜中了" in out
 
@@ -681,7 +681,7 @@ async def test_auto_game_chain_plain_word(plugin):
 @pytest.mark.asyncio
 async def test_auto_game_bomb_plain_number(plugin):
     await run(plugin, "cmd_bomb_start", make_event("数字炸弹 1 30"))
-    target = plugin._bombs["aiocqhttp_group_888"].target
+    target = plugin._bombs["aiocqhttp_group_888:1001"].target
     out = await run(plugin, "on_message", make_event(str(target)))
     assert "BOOM" in out
 
@@ -705,7 +705,7 @@ async def test_auto_game_rush(plugin):
 async def test_auto_game_can_be_disabled(plugin):
     plugin.config["trigger"]["auto_regex_games"] = False
     await run(plugin, "cmd_guess_start", make_event("猜数字"))
-    game = plugin._guesses["aiocqhttp_group_888"]
+    game = plugin._guesses["aiocqhttp_group_888:1001"]
     assert await run(plugin, "on_message", make_event(str(game.target))) == ""
 
 
@@ -956,7 +956,7 @@ async def test_achievements_page_includes_rarity_badge(plugin):
     assert "稀有" in out or "传说" in out
 
 
-# ------------------------------------------------------- v1.3.0 群 Boss 战
+# ------------------------------------------------------- v1.3.0 群 Boss 战（v1.4.6 纯战力）
 
 
 @pytest.mark.asyncio
@@ -964,6 +964,7 @@ async def test_boss_start_creates_fight(plugin):
     out = await run(plugin, "cmd_boss", make_event("讨伐 slime"))
     assert "群 Boss 战开始" in out
     assert "史莱姆王" in out
+    assert "战斗战力" in out or "不花积分" in out
     assert "aiocqhttp_group_888" in plugin._bosses
 
 
@@ -983,89 +984,93 @@ async def test_boss_start_rejects_duplicate(plugin):
 
 @pytest.mark.asyncio
 async def test_boss_attack_without_fight(plugin):
-    out = await run(plugin, "cmd_boss_attack", make_event("攻击 100"))
+    out = await run(plugin, "cmd_boss_attack", make_event("攻击"))
     assert "没有进行中的讨伐" in out
 
 
 @pytest.mark.asyncio
-async def test_boss_attack_zero_spend(plugin):
-    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
-    out = await run(plugin, "cmd_boss_attack", make_event("攻击 0"))
-    assert "大于 0" in out
-
-
-@pytest.mark.asyncio
-async def test_boss_attack_caps_spend(plugin):
-    plugin.config["boss"]["max_spend"] = 100
-    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
-    plugin.store.add_balance("aiocqhttp_group_888", "1001", 10000)
-    out = await run(plugin, "cmd_boss_attack", make_event("攻击 500"))
-    assert "最多投入" in out
-
-
-@pytest.mark.asyncio
-async def test_boss_attack_insufficient_balance(plugin):
-    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
-    out = await run(plugin, "cmd_boss_attack", make_event("攻击 100"))
-    assert "积分不足" in out
-
-
-@pytest.mark.asyncio
-async def test_boss_attack_deducts_balance(plugin):
-    plugin.store.add_balance("aiocqhttp_group_888", "1001", 1000)
-    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
-    await run(plugin, "cmd_boss_attack", make_event("攻击 300"))
-    assert plugin.store.get_user("aiocqhttp_group_888", "1001")["balance"] == 700
-
-
-@pytest.mark.asyncio
-async def test_boss_kill_is_net_negative_and_conserved(plugin):
-    """击杀后分得的总额必须等于奖池，且小于投入（合作有损耗）。"""
+async def test_boss_attack_free_does_not_touch_balance(plugin):
+    """纯战力玩法：攻击一分钱都不该扣。"""
     key = "aiocqhttp_group_888"
-    plugin.store.add_balance(key, "1001", 2000)
-    plugin.store.add_balance(key, "1002", 2000)
+    plugin.store.add_balance(key, "1001", 1000)
     await run(plugin, "cmd_boss", make_event("讨伐 slime"))
-    await run(
-        plugin,
-        "cmd_boss_attack",
-        make_event("攻击 500"),
-    )
-    await run(plugin, "cmd_boss_attack", make_event("攻击 1500", uid="1002"))
-    # 史莱姆王 1200 HP：1001 投入 500 打 500 点，1002 请求 1500 点，
-    # 但 Boss 只剩 700 HP，所以只结算 700 点、退回 800。
-    # 总投入 1200，分得奖池 700 ⇒ 群总资产净减 500（合作有损耗）。
+    out = await run(plugin, "cmd_boss_attack", make_event("攻击"))
+    assert "点伤害" in out
+    assert plugin.store.get_user(key, "1001")["balance"] == 1000
+
+
+@pytest.mark.asyncio
+async def test_boss_attack_rejects_unknown_style(plugin):
+    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    out = await run(plugin, "cmd_boss_attack", make_event("攻击 乱写"))
+    assert "没有这种打法" in out
+
+
+@pytest.mark.asyncio
+async def test_boss_damage_grows_with_power(plugin):
+    """战力必须真的决定伤害：高战力打得更疼。"""
+    key = "aiocqhttp_group_888"
+    weak = plugin.store.get_user(key, "2001")
+    strong = plugin.store.get_user(key, "2002")
+    strong["total_sign"] = 200  # 200 × 5 = 1000 战力
+    weak["total_sign"] = 2  # 10 战力
+    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    await run(plugin, "cmd_boss_attack", make_event("攻击", uid="2001"))
+    await run(plugin, "cmd_boss_attack", make_event("攻击", uid="2002"))
+    fight = plugin._bosses[key]
+    assert fight.damages["2002"] > fight.damages["2001"] * 5
+
+
+@pytest.mark.asyncio
+async def test_boss_counter_style_beats_neutral(plugin):
+    """克制打法要有实打实的加成（用固定随机源排除噪声）。"""
+    style = plugin_main.games_world.BOSS_WEAKNESS["slime"]
+    mult = plugin_main.games_world.battle_counter_multiplier(style, "slime")
+    assert mult == plugin_main.games_world.BATTLE_COUNTER_UP
+    neutral = plugin_main.games_world.battle_counter_multiplier("", "slime")
+    assert neutral == 1.0
+    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    out = await run(plugin, "cmd_boss_attack", make_event(f"攻击 {style}"))
+    assert "克制" in out
+
+
+@pytest.mark.asyncio
+async def test_boss_kill_pays_bounty_and_records_kills(plugin):
+    key = "aiocqhttp_group_888"
     u1 = plugin.store.get_user(key, "1001")
     u2 = plugin.store.get_user(key, "1002")
-    pool_paid = u1["boss_gold"] + u2["boss_gold"]
-    assert pool_paid == 700, f"分得的总额必须等于奖池 700，实际 {pool_paid}"
+    u1["total_sign"] = 60  # 300 战力
+    u2["total_sign"] = 60  # 300 战力：两人都要打出伤害，才谈得上「都记功」
+    await run(plugin, "cmd_boss", make_event("讨伐 slime"))
+    for _ in range(40):
+        if key not in plugin._bosses:
+            break
+        await run(plugin, "cmd_boss_attack", make_event("攻击", uid="1001"))
+        if key not in plugin._bosses:
+            break
+        await run(plugin, "cmd_boss_attack", make_event("攻击", uid="1002"))
 
-    # 溢出退款：1002 实际只该被扣 700（成就奖励另算，单列核对）
-    ach_bonus = sum(
-        reward
-        for code, _n, _f, _t, reward in plugin_main.games_plus.ACHIEVEMENTS
-        if code in u2["achievements"]
-    )
-    assert u2["balance"] == 2000 - 700 + u2["boss_gold"] + ach_bonus
-    assert u2["boss_damage"] == 700, "记功要按实际打出的伤害，不是请求值"
-    assert u1["boss_damage"] == 500
-
-    total_after = u1["balance"] + u2["balance"]
-    assert total_after < 4000, "Boss 战必须让群总资产净减"
     assert key not in plugin._bosses, "击杀后对局应被回收"
-    assert u2["boss_kill"] == 1
-    assert u1["boss_kill"] == 0, "只给最后一击记击杀数"
+    assert u1["boss_kill"] == 1 and u2["boss_kill"] == 1, "参战者都该记击杀功勋"
+    assert u1["boss_damage"] >= 1 and u2["boss_damage"] >= 1
+    assert u1["boss_damage"] > 0 and u2["boss_damage"] > 0
+    # 赏金按人头发，单人不超过 pool * BATTLE_REWARD_SHARE
+    cap = int(
+        plugin_main.games_world.BOSS_MAP["slime"][3]
+        * plugin_main.games_world.BATTLE_REWARD_SHARE
+    )
+    assert 0 < u1["boss_gold"] <= cap
+    assert 0 < u2["boss_gold"] <= cap
 
 
 @pytest.mark.asyncio
-async def test_boss_attack_below_cost_refunds(plugin):
-    """投入不足以折算 1 点伤害时，必须原样退回，不能沉默扣款。"""
-    key = "aiocqhttp_group_888"
-    plugin.store.add_balance(key, "1001", 100)
-    plugin._bosses[key] = plugin_main.games_world.BossFight.create("slime", 0)
-    plugin._bosses[key].cost = 50  # 人为抬高门槛
-    out = await run(plugin, "cmd_boss_attack", make_event("攻击 10"))
-    assert "至少投入" in out
-    assert plugin.store.get_user(key, "1001")["balance"] == 100, "未造成伤害必须退款"
+async def test_boss_bounty_is_bounded(plugin):
+    """赏金不能随参战人数无限放大（否则就是印钞机）。"""
+    bw = plugin_main.games_world
+    pool = 700
+    for people in (1, 2, 5, 20, 100):
+        per = bw.battle_reward(pool, {str(i): 10 for i in range(people)}, people)
+        assert per * people <= pool * bw.BATTLE_REWARD_TOTAL_MULT
 
 
 @pytest.mark.asyncio
@@ -1077,12 +1082,12 @@ async def test_boss_info_without_fight(plugin):
 @pytest.mark.asyncio
 async def test_boss_info_lists_damage_ranking(plugin):
     key = "aiocqhttp_group_888"
-    plugin.store.add_balance(key, "1001", 500)
+    user = plugin.store.get_user(key, "1001")
+    user["total_sign"] = 20
     await run(plugin, "cmd_boss", make_event("讨伐 slime"))
-    await run(plugin, "cmd_boss_attack", make_event("攻击 100"))
+    await run(plugin, "cmd_boss_attack", make_event("攻击"))
     out = await run(plugin, "cmd_boss_info", make_event("讨伐状态"))
     assert "伤害榜" in out
-    assert "100" in out
 
 
 # ------------------------------------------------------- v1.3.0 赛季
