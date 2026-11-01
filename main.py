@@ -603,7 +603,10 @@ class InteractionPlugin(Star):
         verb = tokens[0]
         if verb in ("转账", "转积分", "pay", "transfer"):
             handler, rest = self.cmd_transfer, tokens[1:]
-        elif verb in ("打劫", "抢劫", "rob", "抢"):
+        elif verb in ("打劫", "抢劫", "rob"):
+            # 「抢」这个单字不收：``@某人 抢 3`` 既可能是打劫，也可能是在说
+            # 「抢了个红包」，收益（省一个字）不值这个风险。标准指令
+            # ``打劫`` 本身也只用完整词，裸口令更不该比它宽松。
             handler, rest = self.cmd_rob, tokens[1:]
         else:
             # 没有动作词：可能是玩梗、可能是想 @ 人聊天，也可能只是手滑。
@@ -3386,6 +3389,11 @@ class InteractionPlugin(Star):
             else default_stake
         )
         stake = max(0, min(stake, 100000))
+        # 只有**写出来的**赌注才生效。``pk @某人`` 不带赌注时，duel_stake 是
+        # 发起人单方面的缺省值，被挑战的人从没同意过 —— 替别人下注扣钱
+        # 和「@某人 3 就转账」是同一类错误：替用户做了一个他没做过的决定。
+        if not bet_tokens:
+            stake = 0
         a = self.store.get_user(key, uid)
         a["name"] = name
         b = self.store.get_user(key, target)
@@ -3413,6 +3421,8 @@ class InteractionPlugin(Star):
             self.store.season_offset(key, uid if winner == "a" else target, stake)
             self.store.season_offset(key, loser_uid, -stake)
             line += f"\n赌注 {stake} {self._unit} 已结算。"
+        elif stake <= 0:
+            line += "\n（没写赌注或写成 0，这场是友谊战，不动积分）"
         per = max(1, self._int("social", "intimacy_per_interact", default=2))
         bucket = a.setdefault("intimacy", {})
         points, stage = games_extra.add_intimacy(bucket, uid, target, per)

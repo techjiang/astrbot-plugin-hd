@@ -324,6 +324,42 @@ async def test_bare_at_rob_needs_explicit_word(plugin):
     assert "目标" in out
 
 
+async def test_bare_at_rob_ignores_bare_word_qiang(plugin):
+    """「抢」这个单字不收：``@某人 抢 3`` 可能只是在说「抢了个红包」。"""
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 1000)
+    plugin.store.add_balance(key, "1002", 1000)
+    for text in (" 抢 3", " 抢 50"):
+        ev = at_event(False, text, mention=("1002", "诺里"))
+        assert await say(plugin, ev) == ""
+    assert plugin.store.get_user(key, "1001")["balance"] == 1000
+    assert plugin.store.get_user(key, "1002")["balance"] == 1000
+
+
+async def test_duel_without_stake_is_friendly_match(plugin):
+    """「pk @某人」不写赌注时不能扣默认赌注 —— 对方没同意过。"""
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 100)
+    plugin.store.add_balance(key, "1002", 100)
+    out = await say(plugin, at_event(False, "pk", mention=("1002", "诺里")))
+    assert "友谊战" in out
+    assert plugin.store.get_user(key, "1001")["balance"] == 100
+    assert plugin.store.get_user(key, "1002")["balance"] == 100
+
+
+async def test_duel_with_stake_still_settles(plugin):
+    """写了赌注就照常结算 —— 但不能依赖胜负（战力相同会判平）。"""
+    key = "aiocqhttp_group_888"
+    plugin.store.add_balance(key, "1001", 100)
+    plugin.store.add_balance(key, "1002", 100)
+    out = await say(plugin, at_event(False, "pk 1002 30", mention=("1002", "诺里")))
+    assert "友谊战" not in out
+    won = plugin.store.get_user(key, "1001")["balance"]
+    lost = plugin.store.get_user(key, "1002")["balance"]
+    # 胜/负是 ±30 的零和转移；平手则双方不变
+    assert (won, lost) in ((130, 70), (70, 130), (100, 100))
+
+
 async def test_bare_at_without_mention_is_ignored(plugin):
     """纯数字不能被裸口令吞掉 —— 它可能是对局的输入。"""
     ev = at_event(False, " 19")
