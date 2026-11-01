@@ -589,6 +589,39 @@ class InteractionStore:
 
     # ------------------------------------------------------------------ 投票
 
+    def get_meta(self, session_key: str, field: str, default: Any = None) -> Any:
+        """读取会话级的杂项元数据。
+
+        与用户档案分开存放：元数据属于「这个群」而不是「某个人」，
+        混进 users 会污染排行榜与人数统计。
+
+        Args:
+            session_key: 会话标识。
+            field: 元数据键。
+            default: 不存在时的返回值。
+
+        Returns:
+            元数据值。
+        """
+        data = self._load(session_key)
+        meta = data.get("meta")
+        if not isinstance(meta, dict):
+            return default
+        return meta.get(field, default)
+
+    def set_meta(self, session_key: str, field: str, value: Any) -> None:
+        """写入会话级元数据（异步落盘由调用方的 ``save`` 负责）。
+
+        Args:
+            session_key: 会话标识。
+            field: 元数据键。
+            value: 值。
+        """
+        data = self._load(session_key)
+        meta = data.setdefault("meta", {})
+        meta[field] = value
+        self._mark_dirty(session_key)
+
     def polls(self, session_key: str) -> dict[str, Any]:
         """返回会话下的全部投票。
 

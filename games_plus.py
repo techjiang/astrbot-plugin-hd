@@ -1357,10 +1357,18 @@ POWER_FACTORS: tuple[tuple[str, str, float], ...] = (
     ("mine_clear", "扫雷通关", 10.0),
     ("bj_win", "21点胜", 6.0),
     ("duel_win", "PK 胜利", 12.0),
-    ("boss_damage", "群 Boss 伤害", 3.0),
+    # Boss 伤害刻意**不计入战力**：伤害由战力算出，再把伤害喂回战力就是正反馈，
+    # 打一场战力翻一倍，第二场伤害再翻倍。击杀功勋保留，它是离散的、有上限的。
     ("boss_kill", "群 Boss 击杀", 50.0),
+    # 赛季增量是「本季赚到的钱」的另一种写法，和余额一样会随赏金、
+    # 转账、抽奖起伏 —— 放进战斗口径同样能靠转账/刷分改命，故一并剔除。
     ("season_gain", "本赛季积分", 0.5),
 )
+
+
+# 战斗口径里剔除的字段：它们都「可以用钱换」或「随收益起伏」，
+# 拿它们当战斗数值等于「谁刷得多/转得多谁赢」，而不是「谁玩得好」。
+BATTLE_EXCLUDED = frozenset({"balance", "season_gain"})
 
 
 def power_breakdown(
@@ -1370,15 +1378,15 @@ def power_breakdown(
 
     Args:
         user: 用户档案。
-        with_balance: 是否把「积分余额」计入。战斗口径传 ``False``，
-            因为它不允许转账随时改命。
+        with_balance: 是否把「资产类」字段（余额、赛季增量）计入。
+            战斗口径传 ``False``，因为它们能靠转账 / 刷分随时改命。
 
     Returns:
         ``[(字段名, 展示名, 原始值, 系数, 贡献值), ...]``，只保留有贡献的项。
     """
     rows: list[tuple[str, int, float, int, str]] = []
     for field_name, label, factor in POWER_FACTORS:
-        if field_name == "balance" and not with_balance:
+        if not with_balance and field_name in BATTLE_EXCLUDED:
             continue
         value = max(0, _safe_int(user.get(field_name, 0), 0))
         if value <= 0:
@@ -1388,14 +1396,16 @@ def power_breakdown(
 
 
 def battle_power(user: dict) -> int:
-    """战斗时使用的**纯战力**：剔除可随时转走的积分余额。
+    """战斗时使用的**纯战力**：剔除所有资产类字段（余额、赛季增量）。
 
     展示用战力（:func:`power_of`）包含 ``balance``，这合理 —— 它衡量的是
     「这个人在本群的厚度」。但拿它当战斗数值就有问题：PK / Boss 战的胜负
     取决于谁的余额高，等于「谁的钱包鼓谁赢」，和签到、对局、Boss 这些
     真正打出来的东西毫无关系，转账一笔就能瞬间改命。
 
-    所以战斗一律用这个「资产中立」的口径：只算行为累计，不算余额。
+    所以战斗一律用这个「资产中立」的口径：只算行为累计（签到、对局、击杀），
+    不算余额，也不算「本赛季积分增量」—— 后者是余额的另一种写法，
+    赏金 / 转账 / 抽奖都会让它起伏，同样能靠刷分改命。
     两个口径都能在 ``战力`` 指令里看到，公式也是公开的。
 
     Args:

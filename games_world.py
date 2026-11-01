@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass, field
 
@@ -60,36 +61,87 @@ BOSSES: tuple[tuple[str, str, int, int, int, str], ...] = (
     (
         "slime",
         "史莱姆王",
-        1200,
-        1,
+        180,
+        0,
         700,
         "果冻质感，打起来手感很好，就是有点黏。",
     ),
     (
+        "puppet",
+        "提线木偶",
+        420,
+        0,
+        1500,
+        "看起来像谁，又好像谁都不像；它只在有人盯着的时候动。",
+    ),
+    (
         "dragon",
         "烈焰巨龙",
-        6000,
-        1,
+        600,
+        0,
         3200,
         "翅膀一扇，群里温度都高了两度。",
     ),
     (
+        "void_moth",
+        "虚空蛾",
+        900,
+        0,
+        4200,
+        "翅膀上抖落的不是粉，是一整片被啃掉的夜空。",
+    ),
+    (
         "kraken",
-        "深海巨妖",
-        18000,
-        1,
+        "深渊巨妖",
+        1500,
+        0,
         8800,
         "据说它的触手能同时打十个群。",
     ),
     (
+        "titan",
+        "巨像泰坦",
+        2400,
+        0,
+        12000,
+        "走路的时候整栋楼都在震，但它总是先敲门。",
+    ),
+    (
         "leviathan",
         "虚空利维坦",
-        60000,
-        1,
+        3000,
+        0,
         26000,
         "没人知道它为什么出现，包括它自己。",
     ),
 )
+
+# Boss 别名：群里没人会写「深渊巨妖」四个字，但几乎所有人都会写「海怪」。
+# 这里只做**纯增量**映射，不改动 :data:`BOSSES` 的元组结构（有测试按位置解包）。
+BOSS_ALIASES: dict[str, str] = {
+    "史莱姆": "slime",
+    "史莱姆王": "slime",
+    "史莱姆皇": "slime",
+    "龙": "dragon",
+    "巨龙": "dragon",
+    "红龙": "dragon",
+    "海怪": "kraken",
+    "章鱼": "kraken",
+    "乌贼": "kraken",
+    "深海巨妖": "kraken",
+    "深渊巨妖": "kraken",
+    "利维坦": "leviathan",
+    "虚空利维坦": "leviathan",
+    "木偶": "puppet",
+    "提线木偶": "puppet",
+    "傀儡": "puppet",
+    "蛾": "void_moth",
+    "虚空蛾": "void_moth",
+    "泰坦": "titan",
+    "巨像": "titan",
+    "巨像泰坦": "titan",
+}
+
 BOSS_MAP: dict[str, tuple[str, int, int, int, str]] = {
     code: (name, hp, cost, pool, desc) for code, name, hp, cost, pool, desc in BOSSES
 }
@@ -156,7 +208,19 @@ def boss_share(damages: dict[str, int], pool: int) -> dict[str, int]:
 #
 # 经济上唯一需要守住的约束是「发放 ≤ 上限」，见 :func:`battle_reward`。
 
-# 单次攻击的战力浮动区间（上下各 15%），让同一场里也有悬念
+# 单次攻击取「对数战力」作为底数，再乘一个很小的放大倍率。
+#
+# 为什么不再直接用战力当伤害：战力里含「群 Boss 伤害 ×3」，伤害又反过来涨战力，
+# 于是每打一场战力就翻一倍，第二场伤害跟着翻倍 —— 打的人一路滚到天上去，
+# 没打的人永远追不上。这不是数值调参能解决的问题，是反馈环路。
+# 现在伤害只与战力的**对数**相关（二阶导为负，越强增长越慢）：
+#
+#   伤害 ≈ BATTLE_BASE × ln(1 + 战斗战力)
+#
+# 战力 1000 → 约 41 点，战力 10000 → 约 55 点，20 倍战力只带来 1.34 倍伤害。
+# 这样「战力有用」和「不会滚雪球」可以同时成立。
+BATTLE_BASE = 6.0
+# 单次攻击的随机浮动区间（上下各 15%），让同一场里也有悬念
 BATTLE_SWING = 0.15
 # 克制系数：用对打法伤害提升，用错略微衰减（平均仍是 1.0，不额外送钱）
 BATTLE_COUNTER_UP = 1.3
@@ -172,9 +236,9 @@ BATTLE_MIN_HIT = 1
 # 玩家用「攻击 强攻」指定打法，命中克制关系时伤害 ×1.3。
 BATTLE_STYLES: tuple[tuple[str, str, str], ...] = (
     ("强攻", "burst", "slime"),
-    ("poke", "poke", "kraken"),
-    ("breach", "破甲", "dragon"),
-    ("seal", "封印", "leviathan"),
+    ("消耗", "poke", "kraken"),
+    ("破甲", "breach", "dragon"),
+    ("封印", "seal", "leviathan"),
 )
 
 # Boss → 打法 的默认最优解，用来自动推荐
@@ -183,6 +247,9 @@ BOSS_WEAKNESS: dict[str, str] = {
     "dragon": "破甲",
     "kraken": "消耗",
     "leviathan": "封印",
+    "puppet": "封印",
+    "void_moth": "强攻",
+    "titan": "破甲",
 }
 
 
@@ -235,8 +302,12 @@ def battle_damage(
 ) -> tuple[int, float]:
     """按战力计算一次攻击的伤害。
 
+    伤害取战力的**对数**（见 ``BATTLE_BASE`` 处说明），而不是战力本身。
+    这样战力越高越多伤，但增长是次线性的，不会形成「伤害涨战力、战力涨伤害」
+    的正反馈。
+
     Args:
-        power: 玩家战力（由 ``games_plus.power_of`` 算出）。
+        power: 玩家战斗战力（由 ``games_plus.battle_power`` 算出）。
         boss_code: Boss 码。
         style: 打法名，空串表示不指定。
         rng: 随机源。
@@ -248,7 +319,11 @@ def battle_damage(
     base = max(0, _safe_int(power, 0))
     swing = 1.0 + rng.uniform(-BATTLE_SWING, BATTLE_SWING)
     multiplier = swing * battle_counter_multiplier(style, boss_code)
-    damage = int(base * multiplier)
+    # 零战力直接落到下限：不给「白嫖」的起步伤害，也让断言可预测。
+    if base <= 0:
+        return BATTLE_MIN_HIT, multiplier
+    scale = math.log1p(base)
+    damage = int(BATTLE_BASE * scale * multiplier)
     # 战力为 0 的新号也至少打 1 点，不然「参战」这件事就毫无意义
     return max(BATTLE_MIN_HIT, damage), multiplier
 
