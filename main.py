@@ -423,6 +423,13 @@ class InteractionPlugin(Star):
             super().__init__(context)
         # AstrBot 会把 AstrBotConfig 传进来；转成普通 dict 以便安全 get
         self.config: dict[str, Any] = dict(config) if config else {}
+        # 转生每级加成可配：写进模块级变量，纯逻辑层的 apply_bonus 才能共用
+        rebirth_conf = self.config.get("rebirth_play")
+        games_plus.set_bonus_per_level(
+            rebirth_conf.get("bonus_per_level")
+            if isinstance(rebirth_conf, dict)
+            else games_plus.REBIRTH_BONUS_PER_LEVEL
+        )
         self.store = InteractionStore(resolve_data_dir())
         self._guesses: dict[str, GuessGame] = {}
         self._chains: dict[str, ChainGame] = {}
@@ -928,7 +935,11 @@ class InteractionPlugin(Star):
         return text, ["是", "否"]
 
     def _guess_reward(self) -> int:
-        """猜数字奖励：随难度自动缩放，避免「范围开到 100 万仍送 30」的失衡。"""
+        """猜数字奖励：随难度自动缩放，避免「范围开到 100 万仍送 30」的失衡。
+
+        注意这是**基准值**（未含转生加成）。展示与发放都统一走
+        :meth:`_reward`，否则「开局说 42、实际给 44」这类预告不符会反复出现。
+        """
         lo = self._int("guess_number", "min", default=1)
         hi = self._int("guess_number", "max", default=100)
         lo, hi = games.normalize_range(lo, hi, min_span=1)
@@ -938,6 +949,100 @@ class InteractionPlugin(Star):
         optimal = max(1, math.ceil(math.log2(hi - lo + 1)))
         scale = max(1.0, attempts / optimal)
         return max(1, int(base * min(scale, 10.0)))
+
+    # ------------------------------------------------------------------ 转生加成
+
+    def _bonus_times(self, user: dict) -> int:
+        """读取用户的转生次数（脏数据回退为 0）。"""
+        return games._safe_int(user.get("rebirth", 0), 0)
+
+    def _reward(
+        self, amount: int, user: dict, feature: str = "", put: bool = True
+    ) -> int:
+        """对一个奖励值套用转生加成，并（可选地）直接入账。
+
+        这是全插件**唯一**的发奖入口。历史上每条指令各自 ``balance += x``，
+        结果转生加成只覆盖了 7 条路径，其余十几条全漏，表现就是
+        「转生好像还是不吃加成」。
+
+        Args:
+            amount: 未加成的奖励。
+            user: 用户档案。
+            feature: 玩法标识，见 :data:`games_plus.BONUS_GAINS`；
+                落在 ``BONUS_EXCLUDED`` 里时原样返回。
+            put: 是否把结果直接加到余额。
+
+        Returns:
+            实际发放的奖励值。
+        """
+        gain = games_plus.apply_bonus(amount, self._bonus_times(user), feature)
+        if put and gain > 0:
+            # 用 _grant 而非直接写 balance：静态守卫按「是否调用 _grant」
+            # 判定有没有走统一入口，写两套写法会让守卫失效。
+            self._grant(user, gain)
+        return gain
+
+    def _top_up_reward(
+        self,
+        key: str,
+        uid: str,
+        user: dict,
+        base: int,
+        balance_before: int,
+        feature: str,
+    ) -> int:
+        """给「纯逻辑层已自行入账」的奖励补上转生加成差额。
+
+        ``games.sign_in`` / ``games.claim_quest`` 这类函数在纯逻辑层就把余额
+        改好了，主流程只拿到「改之前/改之后」。此时若再调 ``_reward`` 会把
+        基础奖励加第二遍 —— 是个很隐蔽的重复入账，故单独抽一个入口。
+
+        Args:
+            key: 会话标识。
+            uid: 用户 ID。
+            user: 用户档案。
+            base: 逻辑层实际入账的基础奖励。
+            balance_before: 逻辑层入账之前的余额。
+            feature: 玩法标识。
+
+        Returns:
+            最终发放的总额（基础 + 加成）。
+        """
+        target = self._reward(base, user, feature, put=False)
+        if target > base:
+            self._grant(user, target - base)
+        # 基础部分是逻辑层直接写的，赛季增量必须在这里补记
+        self.store.credit_gain(key, uid, balance_before, user["balance"])
+        return target
+
+    @staticmethod
+    def _grant(user: dict, amount: int) -> int:
+        """把一笔（已加成/零和结算后的）积分记入余额。
+
+        Args:
+            user: 用户档案。
+            amount: 变化量，可为负；余额不小于 0。
+
+        Returns:
+            实际记入的变动量（可能因触底而被截断）。
+        """
+        before = int(user.get("balance", 0) or 0)
+        after = max(0, before + int(amount))
+        user["balance"] = after
+        return after - before
+
+    @staticmethod
+    def _bonus_scope_text() -> str:
+        """列出所有吃转生加成的玩法（展示用）。"""
+        return "、".join(games_plus.BONUS_GAINS.values())
+
+    def _reward_text(self, amount: int, user: dict, feature: str = "") -> str:
+        """生成与 :meth:`_reward` 完全一致的预告文案。
+
+        任何「开局就告诉玩家能拿多少」的地方都必须用这个函数，让预告和实发
+        共用一套计算 —— 否则一旦改数值就会再次出现「后台 30、实际 42」。
+        """
+        return games_plus.bonus_preview(amount, self._bonus_times(user), feature)
 
     # ------------------------------------------------------------------ 免唤醒分发
 
@@ -1452,12 +1557,17 @@ class InteractionPlugin(Star):
         bonus_note = ""
         if ok:
             games.bump_daily(user, "sign")
-            times = int(user.get("rebirth", 0) or 0)
-            if times:
-                extra = games_plus.apply_bonus(reward, times) - reward
-                if extra:
-                    user["balance"] = int(user["balance"]) + extra
-                    bonus_note = f"（转生加成 +{extra}）"
+            # ``games.sign_in`` 已经把**基础奖励**记进余额了，这里只补加成差额。
+            # 之前直接 ``_reward(reward)`` 会把基础奖励加第二遍（1000 签到变 1020），
+            # 而 ``season_gain`` 又漏掉基础部分 —— 两个错误互相抵消了「余额看着对」，
+            # 全靠这轮单测才挖出来。
+            before = games._safe_int(user.get("balance", 0), 0)
+            extra = self._reward(reward, user, "sign", put=False) - reward
+            if extra > 0:
+                self._grant(user, extra)
+                bonus_note = f"（转生加成 +{extra}）"
+            # 基础奖励是 sign_in 直接写的，赛季增量要在这里补记
+            self.store.credit_gain(key, uid, before - reward, user["balance"])
             bonus_note += self._achievement_scan(user)
         await self.store.save(key)
         flavor = self._rng.choice(games.SIGN_FLAVORS)
@@ -1576,10 +1686,13 @@ class InteractionPlugin(Star):
             rng=self._rng,
         )
         self._guesses[key] = game
+        uid, _name = self._sender(event)
+        user = self.store.get_user(key, uid)
         return event.plain_result(
             f"🎯 猜数字开始！范围 {game.low} ~ {game.high}，"
             f"共 {game.max_attempts} 次机会。\n发送「猜 <数字>」来猜，"
-            f"猜中得 {self._guess_reward()} {self._unit}。"
+            f"猜中得 {self._reward_text(self._guess_reward(), user, 'guess')} "
+            f"{self._unit}。"
         )
 
     @filter.command("猜", alias={"cai"})
@@ -1629,11 +1742,8 @@ class InteractionPlugin(Star):
             if result == "win":
                 user = self.store.get_user(key, uid)
                 user["name"] = name
-                reward = games_plus.apply_bonus(
-                    self._guess_reward(), int(user.get("rebirth", 0) or 0)
-                )
+                reward = self._reward(self._guess_reward(), user, "guess")
                 user["guess_win"] = int(user.get("guess_win", 0) or 0) + 1
-                user["balance"] = int(user.get("balance", 0) or 0) + reward
                 games.bump_daily(user, "guess")
                 hint += f" 奖励 {reward} {self._unit}！{self._achievement_scan(user)}"
                 await self.store.save(key, force=True)
@@ -1710,12 +1820,10 @@ class InteractionPlugin(Star):
         game.started_at = time.time()
         user = self.store.get_user(key, uid)
         user["name"] = name
-        reward = games_plus.apply_bonus(
-            self._int("word_chain", "reward", default=5),
-            int(user.get("rebirth", 0) or 0),
-        )
         user["chain_win"] = int(user.get("chain_win", 0) or 0) + 1
-        user["balance"] = int(user.get("balance", 0) or 0) + reward
+        reward = self._reward(
+            self._int("word_chain", "reward", default=5), user, "chain"
+        )
         games.bump_daily(user, "chain")
         await self.store.save(key)
         flavor = self._rng.choice(games.CHAIN_FLAVORS)
@@ -2092,11 +2200,14 @@ class InteractionPlugin(Star):
             for quest, done_count, is_done in games.quest_progress(user):
                 if is_done or done_count < quest["target"]:
                     continue
+                # ``claim_quest`` 自己就把奖励记进余额了，这里只补转生加成差额
+                before = games._safe_int(user.get("balance", 0), 0)
                 ok, reward, msg = games.claim_quest(user, quest["code"])
                 if ok:
                     claimed += 1
-                    total_reward += reward
-                    notes.append(msg)
+                    gain = self._top_up_reward(key, uid, user, reward, before, "quest")
+                    total_reward += gain
+                    notes.append(msg.replace(f"{reward} 积分", f"{gain} {self._unit}"))
             if not claimed:
                 return event.plain_result(
                     "暂时没有可领取的任务奖励，发送「每日任务」查看进度。"
@@ -2107,8 +2218,11 @@ class InteractionPlugin(Star):
                 + "\n".join(notes)
             )
 
+        before = games._safe_int(user.get("balance", 0), 0)
         ok, reward, msg = games.claim_quest(user, code)
         if ok:
+            gain = self._top_up_reward(key, uid, user, reward, before, "quest")
+            msg = msg.replace(f"{reward} 积分", f"{gain} {self._unit}")
             await self.store.save(key, force=True)
         return event.plain_result(f"@{name} {msg}")
 
@@ -2135,19 +2249,20 @@ class InteractionPlugin(Star):
         user = self.store.get_user(key, uid)
         user["name"] = name
 
+        base_reward = max(1, self._int("lucky", "reward", default=15))
         if not arg:
             await self.store.save(key)
             return event.plain_result(
                 f"🍀 @{name} 今天的幸运数字是 {lucky}。\n"
                 f"发送「幸运数字 <你猜的数字>」看看是否命中，"
-                f"命中可获得 {self._int('lucky', 'reward', default=15)} {self._unit}。"
+                f"命中可获得 {self._reward_text(base_reward, user, 'lucky')} "
+                f"{self._unit}。"
             )
 
         try:
             value = int(arg)
         except (TypeError, ValueError):
             return event.plain_result("请发送一个 1~100 的整数。")
-        reward = max(1, self._int("lucky", "reward", default=15))
         if not games.lucky_hit(today, uid, value):
             await self.store.save(key)
             return event.plain_result(
@@ -2160,7 +2275,7 @@ class InteractionPlugin(Star):
             )
         user["lucky_last"] = today
         user["lucky_hit"] = int(user.get("lucky_hit", 0) or 0) + 1
-        user["balance"] = int(user.get("balance", 0) or 0) + reward
+        reward = self._reward(base_reward, user, "lucky")
         await self.store.save(key, force=True)
         return event.plain_result(
             f"🎉 @{name} 猜对了！今天的幸运数字就是 {lucky}，"
@@ -2406,7 +2521,7 @@ class InteractionPlugin(Star):
         if result == "win":
             user["bj_win"] = int(user.get("bj_win", 0) or 0) + 1
         if payout:
-            user["balance"] = int(user.get("balance", 0) or 0) + payout
+            self._grant(user, payout)  # 21 点是对赌派彩，不吃加成
         games.bump_daily(user, "blackjack")
         await self.store.save(key, force=True)
         text = {
@@ -2489,10 +2604,10 @@ class InteractionPlugin(Star):
             return event.plain_result(
                 f"{msg}\n@{name} 被炸飞，扣 {punish} {self._unit}（余额 {user['balance']}）。"
             )
-        reward = max(0, self._int("bomb", "reward", default=1))
         user["bomb_win"] = int(user.get("bomb_win", 0) or 0) + 1
-        if reward:
-            user["balance"] = int(user.get("balance", 0) or 0) + reward
+        reward = self._reward(
+            max(0, self._int("bomb", "reward", default=1)), user, "bomb"
+        )
         games.bump_daily(user, "bomb")
         await self.store.save(key)
         return event.plain_result(f"@{name} {msg}（+{reward} {self._unit}）")
@@ -2509,6 +2624,8 @@ class InteractionPlugin(Star):
         if not self._feature_on("riddle"):
             return self._deny("猜谜已关闭。")
         key = self._session_key(event)
+        uid, _name = self._sender(event)
+        user = self.store.get_user(key, uid)
         question, answer, hint = games_extra.random_riddle(self._rng)
         timeout = max(10, self._int("riddle", "timeout_seconds", default=60))
         self._riddles[key] = {
@@ -2517,8 +2634,10 @@ class InteractionPlugin(Star):
             "hint": hint,
             "started_at": time.time(),
         }
+        base = max(0, self._int("riddle", "reward", default=20))
         return event.plain_result(
-            f"🧩 谜语：{question}\n（{timeout} 秒内直接发答案，第一位答对者获奖）"
+            f"🧩 谜语：{question}\n（{timeout} 秒内直接发答案，第一位答对者获奖 "
+            f"{self._reward_text(base, user, 'riddle')} {self._unit}）"
         )
 
     @filter.command("谜底", alias={"答案", "公布答案"})
@@ -2562,10 +2681,11 @@ class InteractionPlugin(Star):
             return None
         self._riddles.pop(key, None)
         uid, name = self._sender(event)
-        reward = max(0, self._int("riddle", "reward", default=20))
         user = self.store.get_user(key, uid)
         user["name"] = name
-        user["balance"] = int(user.get("balance", 0) or 0) + reward
+        reward = self._reward(
+            max(0, self._int("riddle", "reward", default=20)), user, "riddle"
+        )
         user["riddle_win"] = int(user.get("riddle_win", 0) or 0) + 1
         games.bump_daily(user, "riddle")
         await self.store.save(key, force=True)
@@ -2639,12 +2759,15 @@ class InteractionPlugin(Star):
         if not self._feature_on("rush"):
             return self._deny("抢答已关闭。")
         key = self._session_key(event)
+        uid, _name = self._sender(event)
+        user = self.store.get_user(key, uid)
         keyword = args.strip() or self._args(event).strip() or "我最快"
         timeout = max(5, self._int("rush", "timeout_seconds", default=30))
         reward = max(0, self._int("rush", "reward", default=10))
         self._rushes[key] = games_extra.RushGame(keyword=keyword, reward=reward)
         return event.plain_result(
-            f"⚡ 抢答开始！最先发出「{keyword}」的人获胜（{timeout} 秒内）。直接发就行！"
+            f"⚡ 抢答开始！最先发出「{keyword}」的人获胜（{timeout} 秒内），"
+            f"奖励 {self._reward_text(reward, user, 'rush')} {self._unit}。直接发就行！"
         )
 
     async def _rush_check(
@@ -2674,10 +2797,9 @@ class InteractionPlugin(Star):
         if not ok:
             return None
         self._rushes.pop(key, None)
-        reward = game.reward
         user = self.store.get_user(key, uid)
         user["name"] = name
-        user["balance"] = int(user.get("balance", 0) or 0) + reward
+        self._reward(game.reward, user, "rush")
         games.bump_daily(user, "rush")
         await self.store.save(key, force=True)
         return event.plain_result(
@@ -2792,7 +2914,7 @@ class InteractionPlugin(Star):
         if kind == "title":
             title_name = name.split("·", 1)[-1]
             if title_name in (user.get("titles") or []):
-                user["balance"] = int(user["balance"]) + price
+                self._grant(user, price)  # 全额退款
                 return event.plain_result(
                     f"你已经拥有称号「{title_name}」，已退还 {price} {self._unit}。"
                 )
@@ -2802,7 +2924,7 @@ class InteractionPlugin(Star):
         elif kind == "frame":
             frame_name = name.split("·", 1)[-1]
             if frame_name in (user.get("frames") or []):
-                user["balance"] = int(user["balance"]) + price
+                self._grant(user, price)  # 全额退款
                 return event.plain_result(
                     f"你已经拥有头像框「{frame_name}」，已退还 {price} {self._unit}。"
                 )
@@ -3058,12 +3180,12 @@ class InteractionPlugin(Star):
         other = self.store.display_name(key, target)
         if winner == "a":
             a["duel_win"] = int(a.get("duel_win", 0) or 0) + 1
-            a["balance"] = int(a["balance"]) + stake
+            self._grant(a, stake)  # 零和转移
             b["balance"] = max(0, int(b["balance"]) - stake)
             line = f"⚔️ {name} 战胜了 {other}（战力差 {diff}）！{flavor}"
         elif winner == "b":
             b["duel_win"] = int(b.get("duel_win", 0) or 0) + 1
-            b["balance"] = int(b["balance"]) + stake
+            self._grant(b, stake)  # 零和转移
             a["balance"] = max(0, int(a["balance"]) - stake)
             line = f"⚔️ {other} 战胜了 {name}（战力差 {diff}）！{flavor}"
         else:
@@ -3083,6 +3205,10 @@ class InteractionPlugin(Star):
         """检查并解锁成就，顺带把推荐/全局加成需要的字段补齐。
 
         每次成功结算后调用即可；无新成就时返回空字符串，方便直接拼消息。
+
+        **成就奖励不吃转生加成**：这是刻意设计。成就是一次性的里程碑，
+        乘上倍率只会让先转生的人白拿双份，而文案里写的是固定值
+        （``+60``），加成后会「说了不算」。想改奖励就改成就表本身。
 
         Args:
             user: 用户档案（就地更新）。
@@ -3201,7 +3327,7 @@ class InteractionPlugin(Star):
         if not ok:
             return event.plain_result(msg)
         delta = int(msg.split(":", 1)[1])
-        user["balance"] = max(0, int(user.get("balance", 0) or 0) + delta)
+        self._grant(user, delta)  # 竞猜是零和玩法，不加成
         user["wager_total"] = int(user.get("wager_total", 0) or 0) + 1
         await self.store.save(key)
         odds = game.odds().get(game.options[index - 1], 0.0)
@@ -3262,7 +3388,7 @@ class InteractionPlugin(Star):
             _back, share = games_plus.wager_payout(
                 amount, odds, losers_pool=losses, winner_pool=winner_pool
             )
-            user["balance"] = int(user.get("balance", 0) or 0) + amount + share
+            self._grant(user, amount + share)  # 竞猜派彩零和
             user["wager_win"] = int(user.get("wager_win", 0) or 0) + 1
             sign = f"+{share}" if share > 0 else "±0"
             winners.append(f"{self.store.display_name(key, uid)} {sign}")
@@ -3350,9 +3476,7 @@ class InteractionPlugin(Star):
             user = self.store.get_user(key, uid)
             user["name"] = name
             if result == "win":
-                user["rebirth"] = int(user.get("rebirth", 0) or 0)
-                gain = games_plus.apply_bonus(reward, user["rebirth"])
-                user["balance"] = int(user.get("balance", 0) or 0) + gain
+                gain = self._reward(reward, user, "tictactoe")
                 user["ttt_win"] = int(user.get("ttt_win", 0) or 0) + 1
                 tail_extra = f"\n+{gain} {self._unit}"
             elif result == "lose":
@@ -3436,15 +3560,13 @@ class InteractionPlugin(Star):
                 f"（余额 {user['balance']}）。{tail}"
             )
         per = max(0, self._int("mine", "reward_per_cell", default=1))
-        gain = len(opened) * per
-        gain = games_plus.apply_bonus(gain, int(user.get("rebirth", 0) or 0))
-        user["balance"] = int(user.get("balance", 0) or 0) + gain
+        gain = self._reward(len(opened) * per, user, "mine")
         user["mine_open"] = int(user.get("mine_open", 0) or 0) + len(opened)
         tail = ""
         if game.cleared():
-            bonus = max(0, self._int("mine", "clear_reward", default=80))
-            bonus = games_plus.apply_bonus(bonus, int(user.get("rebirth", 0) or 0))
-            user["balance"] = int(user.get("balance", 0) or 0) + bonus
+            bonus = self._reward(
+                max(0, self._int("mine", "clear_reward", default=80)), user, "mine"
+            )
             user["mine_clear"] = int(user.get("mine_clear", 0) or 0) + 1
             self._mines.pop(key, None)
             tail = f"\n🧹 通关奖励 {bonus} {self._unit}！"
@@ -3514,16 +3636,18 @@ class InteractionPlugin(Star):
             user = self.store.get_user(key, uid)
             user["name"] = name
             if result == "win":
-                reward = max(0, self._int("codebreaker", "reward", default=120))
-                gain = games_plus.apply_bonus(reward, int(user.get("rebirth", 0) or 0))
-                user["balance"] = int(user.get("balance", 0) or 0) + gain
+                gain = self._reward(
+                    max(0, self._int("codebreaker", "reward", default=120)),
+                    user,
+                    "codebreaker",
+                )
                 user["code_win"] = int(user.get("code_win", 0) or 0) + 1
                 extra = max(0, game.max_attempts - game.attempts)
-                spot_extra = extra * max(
-                    0, self._int("codebreaker", "early_bonus", default=10)
+                spot_extra = self._reward(
+                    extra * max(0, self._int("codebreaker", "early_bonus", default=10)),
+                    user,
+                    "codebreaker",
                 )
-                if spot_extra:
-                    user["balance"] = int(user["balance"]) + spot_extra
                 tail = f" 奖励 {gain} {self._unit}"
                 if spot_extra:
                     tail += f"（提前 {extra} 次完成，额外 +{spot_extra}）"
@@ -3567,11 +3691,7 @@ class InteractionPlugin(Star):
         side = games_plus.flip_coin(self._rng)
         win = side == pick
         if bet:
-            user["balance"] = (
-                int(user["balance"]) + bet
-                if win
-                else max(0, int(user["balance"]) - bet)
-            )
+            self._grant(user, bet if win else -bet)  # 零和对赌
         tail = ""
         if win:
             user["coin_win"] = int(user.get("coin_win", 0) or 0) + 1
@@ -3632,7 +3752,7 @@ class InteractionPlugin(Star):
             # 决斗盘是**零和**对赌：赢拿 +bet、输扣 -bet，三方等概率。
             # 若给赢的那一份乘上转生加成，期望就会变成 (加成-1)/3 × bet > 0，
             # 转生后可以靠反复对赌无限刷分 —— 故这里不加成，与抛硬币保持一致。
-            user["balance"] = int(user["balance"]) + bet
+            self._grant(user, bet)  # 零和对赌
             text = f"🎉 你出 {mine}，我出 {foe} —— {games_plus.rpsls_flavor(mine, foe)}，你赢了！"
             if bet:
                 text += f"（+{bet} {self._unit}）"
@@ -3698,7 +3818,7 @@ class InteractionPlugin(Star):
         # 转盘是**回收型玩法**：奖池期望本就低于消耗（回收率 ≈ 91%）。
         # 转生加成会把这个期望按倍率放大，转生 2 次（×1.10）后期望即翻正，
         # 变成「转得越多、赚得越多」的印钞机 —— 故转盘不享受转生加成。
-        user["balance"] = max(0, int(user["balance"]) + net)
+        self._grant(user, net)  # 转盘零和回收，刻意不吃转生加成
         user["wheel_count"] = int(user.get("wheel_count", 0) or 0) + times
         user["last_wheel_ts"] = now
         games.bump_daily(user, "wheel")
@@ -3922,6 +4042,7 @@ class InteractionPlugin(Star):
                 f"当前加成 ×{games_plus.rebirth_bonus(times):.2f}\n"
                 f"条件：Lv.{games_plus.REBIRTH_MIN_LEVEL} 以上（上限 {games_plus.REBIRTH_MAX} 次）\n"
                 f"代价：积分归零、称号卸下；统计与成就全部保留。\n"
+                f"加成生效于：{self._bonus_scope_text()}\n"
                 f"确认后发送「转生 确认」。"
             )
         ok, msg = games_plus.rebirth_reset(user)
@@ -3950,9 +4071,26 @@ class InteractionPlugin(Star):
         self._season_sync(user, season)
         gain = int(user.get("season_gain", 0) or 0)
         stage, _next, _remain = games_world.season_progress(gain)
+        bonus = games_plus.rebirth_bonus(times)
+        # 逐项写出「×倍率后实际多少」：只写一个总倍率，玩家没法直观判断
+        # 自己到底吃没吃到加成 —— 这正是「转生好像还是不吃加成」的来源。
+        samples = "、".join(
+            f"{label} +{games_plus.apply_bonus(base, times, feat)}"
+            for feat, label, base in (
+                ("sign", "签到", 10),
+                ("guess", "猜数字", self._guess_reward()),
+                ("chain", "接龙", self._int("word_chain", "reward", default=5)),
+                ("lucky", "幸运数字", self._int("lucky", "reward", default=15)),
+                ("quiz", "知识竞速", self._int("quiz", "reward", default=25)),
+            )
+        )
         return event.plain_result(
             f"⚡ @{name} 的加成\n"
-            f"转生 {times} 次｜收益加成 ×{games_plus.rebirth_bonus(times):.2f}\n"
+            f"转生 {times} 次｜收益加成 ×{bonus:.2f}"
+            f"（每级 +{games_plus.bonus_per_level() * 100:.0f}%）\n"
+            f"折算示例：{samples}\n"
+            f"✅ 吃加成：{self._bonus_scope_text()}\n"
+            f"⛔ 不吃加成：{'、'.join(games_plus.BONUS_EXCLUDED)}\n"
             f"标签 {info['unlocked']}/{info['total']}（{info['percent']}%）\n"
             f"赛季 {season}｜段位 {stage}｜本季增量 {gain}\n"
             f"宠物 {pet_name}（产出 +{pet_bonus}）\n"
@@ -4039,7 +4177,7 @@ class InteractionPlugin(Star):
         dealt, remaining, killed = fight.attack(uid, spend)
         if dealt <= 0:
             # 投入不足以折算 1 点伤害：全额退回，不留沉默扣款
-            user["balance"] = int(user.get("balance", 0) or 0) + spend
+            self._grant(user, spend)  # 伤害折算不足 1 点，全额退回
             need = max(1, fight.cost)
             return event.plain_result(f"至少投入 {need} {self._unit} 才能造成伤害。")
         # 溢出伤害要退款：Boss 只剩 10 滴血时你投入 5000，
@@ -4047,7 +4185,7 @@ class InteractionPlugin(Star):
         billed = dealt * max(1, fight.cost)
         refund = spend - billed
         if refund > 0:
-            user["balance"] = int(user.get("balance", 0) or 0) + refund
+            self._grant(user, refund)  # 溢出伤害原路退回
             spend = billed
             fight.spenders[uid] = max(0, fight.spenders.get(uid, 0) - refund)
 
@@ -4256,9 +4394,7 @@ class InteractionPlugin(Star):
         pet.care += 1
         pet.fed_at = now
         user["pet"] = pet.to_dict()
-        gain = games_world.pet_gain(pet.care, self._rng)
-        if gain:
-            user["balance"] = int(user.get("balance", 0) or 0) + gain
+        gain = self._reward(games_world.pet_gain(pet.care, self._rng), user, "pet")
         after_code, after_name, bonus = games_world.pet_stage(pet.care)
         lines = [
             f"@{name} 照料了「{pet.name or '未命名'}」",
@@ -4674,7 +4810,9 @@ class InteractionPlugin(Star):
         note = str(result["note"])
         if result["ok"] and not result["tie"]:
             for member in result["winners"]:
-                self.store.add_balance(key, member, tug.prizes)
+                # 拔河奖金按人头算，每个人的转生倍率不同，得逐人套用
+                winner = self.store.get_user(key, member)
+                self._reward(tug.prizes, winner, "tug")
         await self.store.save(key)
         self._tugs.pop(key, None)
         return MessageEventResult().message(note)
@@ -4724,10 +4862,13 @@ class InteractionPlugin(Star):
             return event.plain_result("需要两个不同的队名。")
         self._tugs[key] = game
         names = " / ".join(game.teams)
+        uid, _name = self._sender(event)
+        user = self.store.get_user(key, uid)
         return event.plain_result(
             f"🪢 拔河开始！{names}\n"
             f"发送「加入 <队名> <力量>」投入，时长 {game.duration // 60} 分钟。\n"
-            f"胜方每人得 {game.prizes} {self._unit}（力量只比大小，不扣分）。"
+            f"胜方每人得 {self._reward_text(game.prizes, user, 'tug')} {self._unit}"
+            f"（力量只比大小，不扣分）。"
         )
 
     @filter.command("加入", alias={"入队", "join"})
@@ -4786,11 +4927,12 @@ class InteractionPlugin(Star):
         )
         self._quizzes[key] = game
         self._quiz_last[key] = game.question
-        reward = self._int("quiz", "reward", default=25)
+        reward = max(0, self._int("quiz", "reward", default=25))
+        user = self.store.get_user(key, uid)
         return event.plain_result(
             f"🧠 知识竞速！\n{game.question}\n"
-            f"限时 {game.timeout} 秒，答对得 {reward} {self._unit}；"
-            f"直接在群里发答案即可（答错 3 秒后才能再答）。"
+            f"限时 {game.timeout} 秒，答对得 {self._reward_text(reward, user, 'quiz')} "
+            f"{self._unit}；直接在群里发答案即可（答错 3 秒后才能再答）。"
         )
 
     @filter.command("答题", alias={"answer"})
@@ -4834,9 +4976,10 @@ class InteractionPlugin(Star):
         """
         outcome, msg = game.submit(uid, answer)
         if outcome == "correct":
-            reward = self._int("quiz", "reward", default=25)
             user = self.store.get_user(key, uid)
-            self.store.add_balance(key, uid, reward)
+            reward = self._reward(
+                max(0, self._int("quiz", "reward", default=25)), user, "quiz"
+            )
             user["quiz_win"] = games._safe_int(user.get("quiz_win"), 0) + 1
             games.bump_daily(user, "quiz")
             await self.store.save(key)

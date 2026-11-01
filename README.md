@@ -8,7 +8,7 @@
 
 让群聊真正热闹起来的一站式玩法合集
 
-[![version](https://img.shields.io/badge/version-v1.4.3-4f7cff)](./metadata.yaml)
+[![version](https://img.shields.io/badge/version-v1.4.5-4f7cff)](./metadata.yaml)
 [![astrbot](https://img.shields.io/badge/AstrBot-%3E%3D4.10%2C%20%3C5-22c55e)](https://astrbot.app)
 [![python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)](./pyproject.toml)
 [![deps](https://img.shields.io/badge/第三方依赖-0-ff9800)](./requirements.txt)
@@ -144,8 +144,8 @@ AstrBot 侧所需的一切（`astrbot.api.*`）都由 AstrBot 自身提供，
 | 指令 | 说明 |
 | --- | --- |
 | `成就` | 22 项成就，达成自动解锁并发奖 |
-| `转生 [确认]` | Lv.15 起可转生：积分归零换永久收益加成（最高 ×2.0） |
-| `我的加成` | 查看转生加成、成就进度与今日商店折扣 |
+| `转生 [确认]` | Lv.15 起可转生：积分归零换永久收益加成（默认每次 +5%，最高 20 次） |
+| `我的加成` | 查看转生倍率、每项玩法的实际折算值、成就进度与今日折扣 |
 
 ### 标签体系（v1.3.0 新增 2 个）
 
@@ -286,8 +286,8 @@ AstrBot 侧所需的一切（`astrbot.api.*`）都由 AstrBot 自身提供，
 pip install ruff pytest pytest-asyncio
 
 ruff format . && ruff check .      # 代码风格
-python -m pytest tests -q          # 576 项单元/集成测试
-python tools/e2e_smoke.py          # 真实 AstrBot 框架下的 223 项端到端冒烟测试
+python -m pytest tests -q          # 615 项单元/集成测试
+python tools/e2e_smoke.py          # 真实 AstrBot 框架下的 234 项端到端冒烟测试
 python tools/build_logo.py assets/design-source.png assets   # 重新生成 logo 资源
 ```
 

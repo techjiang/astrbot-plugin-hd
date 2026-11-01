@@ -403,6 +403,28 @@ class InteractionStore:
         self._mark_dirty(session_key)
         return user["balance"]
 
+    def credit_gain(
+        self, session_key: str, user_id: str, before: int, after: int
+    ) -> None:
+        """按「某段代码改了余额」的前后差值补记赛季增量。
+
+        有些玩法（签到、抽奖）在纯逻辑层就一次性算好余额，主流程只拿到
+        「改之前/改之后」。它们同样属于收益，必须计入赛季成绩 —— 否则
+        又会出现「PK 算分、签到不算分」这类上报缺陷。
+
+        Args:
+            session_key: 会话标识。
+            user_id: 用户 ID。
+            before: 改动前的余额。
+            after: 改动后的余额。
+        """
+        delta = max(0, int(after)) - max(0, int(before))
+        if delta <= 0:
+            return
+        user = self.get_user(session_key, user_id)
+        user["season_gain"] = max(0, _to_int(user.get("season_gain"), 0)) + delta
+        self._mark_dirty(session_key)
+
     def transfer(
         self, session_key: str, src: str, dst: str, amount: int
     ) -> tuple[bool, str]:

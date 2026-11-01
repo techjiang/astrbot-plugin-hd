@@ -1154,13 +1154,89 @@ def discounted_price(price: int, percent: int) -> int:
 
 
 # --------------------------------------------------------------------- 转生
+#
+# 转生加成最容易出的问题不是「算错」，而是「漏算」：加成只有一个入口
+# ``apply_bonus()``，但全插件有几十处发奖点，靠人肉记得逐个调用是不现实的
+# —— v1.4.4 之后依然漏了幸运数字、猜谜、抢答、知识竞速、每日任务、拔河、
+# 宠物等 7 条路径，表现就是「转生好像还是不吃加成」。
+#
+# 所以这里把「吃不吃加成」变成一张**政策表**：每个玩法显式声明自己的经济
+# 性质（:data:`BONUS_GAINS` / :data:`BONUS_ZERO_SUM`），未登记的一律按
+# 「吃加成」处理（``apply_bonus`` 的缺省行为）。这样新增玩法时忘登记只会
+# 「多给加成」而不是「漏加成」，且测试可以逐项核对覆盖情况。
 
 # 转生所需最低等级
 REBIRTH_MIN_LEVEL = 15
-# 每次转生提供的收益加成（乘法叠加）
+# 每次转生提供的收益加成（默认值；运行期由配置覆盖，见 set_bonus_per_level）
 REBIRTH_BONUS_PER_LEVEL = 0.05
+# 每级加成的取值上限：0% ~ 50%，防止配置写成 5.0 让加成直接 ×100
+REBIRTH_BONUS_PER_LEVEL_MAX = 0.5
 # 转生等级上限
 REBIRTH_MAX = 20
+
+# 收益型玩法（吃转生加成）。值为展示名，用于「我的加成」逐项列出。
+BONUS_GAINS: dict[str, str] = {
+    "sign": "签到",
+    "guess": "猜数字",
+    "chain": "词语接龙",
+    "tictactoe": "井字棋",
+    "mine": "扫雷",
+    "codebreaker": "数字破解",
+    "lucky": "幸运数字",
+    "riddle": "猜谜",
+    "rush": "抢答",
+    "quiz": "知识竞速",
+    "quest": "每日任务",
+    "tug": "拔河",
+    "pet": "宠物照料",
+}
+
+# 零和 / 回收型玩法（**刻意不吃**转生加成）。
+# 给它们乘加成会把期望直接翻正，变成「转得越多、赚得越多」的印钞机。
+BONUS_EXCLUDED: dict[str, str] = {
+    "lottery": "抽奖（奖池期望已被消耗压住）",
+    "wheel": "大转盘（回收型，回收率 ≈ 91%）",
+    "coin": "抛硬币（零和对赌）",
+    "rpsls": "决斗盘（零和对赌）",
+    "duel": "PK（零和转移）",
+    "blackjack": "21 点（庄家赔率对赌）",
+    "wager": "竞猜（零和派彩）",
+    "boss": "群 Boss 战（奖池小于投入）",
+    "monopoly": "大富翁（通缩棋盘）",
+    "auction": "拍卖行（零和转移）",
+    "transfer": "转账（零和转移）",
+    "rob": "打劫（零和转移）",
+    "season": "赛季奖励（一次性档位，防刷）",
+    "achievement": "成就（一次性里程碑，固定奖励）",
+}
+
+# 运行期可覆盖的每级加成（由插件在加载配置时注入）
+_BONUS_PER_LEVEL = REBIRTH_BONUS_PER_LEVEL
+
+
+def set_bonus_per_level(value: object) -> float:
+    """设置每次转生的收益加成系数（运行期由 WebUI 配置注入）。
+
+    Args:
+        value: 每级加成，``0.05`` 表示每转生一次 +5%。
+
+    Returns:
+        实际生效的系数（已收敛到 ``[0, 0.5]``）。
+    """
+    global _BONUS_PER_LEVEL
+    try:
+        per = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        per = REBIRTH_BONUS_PER_LEVEL
+    if per != per or per in (float("inf"), float("-inf")):  # NaN / inf
+        per = REBIRTH_BONUS_PER_LEVEL
+    _BONUS_PER_LEVEL = min(max(0.0, per), REBIRTH_BONUS_PER_LEVEL_MAX)
+    return _BONUS_PER_LEVEL
+
+
+def bonus_per_level() -> float:
+    """返回当前生效的每级加成系数。"""
+    return _BONUS_PER_LEVEL
 
 
 def rebirth_bonus(rebirth: int) -> float:
@@ -1173,15 +1249,16 @@ def rebirth_bonus(rebirth: int) -> float:
         形如 ``1.25`` 的倍率（1 表示无加成）。
     """
     times = _clamp_int(rebirth, 0, REBIRTH_MAX, 0)
-    return round(1.0 + times * REBIRTH_BONUS_PER_LEVEL, 4)
+    return round(1.0 + times * _BONUS_PER_LEVEL, 4)
 
 
-def apply_bonus(amount: int, rebirth: int) -> int:
+def apply_bonus(amount: int, rebirth: int, feature: str = "") -> int:
     """把转生加成作用到一笔奖励上。
 
     Args:
         amount: 原始奖励。
         rebirth: 转生次数。
+        feature: 玩法标识；落在 :data:`BONUS_EXCLUDED` 里时原样返回。
 
     Returns:
         加成后的奖励（至少 1，若原始奖励为正）。
@@ -1189,7 +1266,31 @@ def apply_bonus(amount: int, rebirth: int) -> int:
     base = _safe_int(amount)
     if base <= 0:
         return 0
+    if feature and feature in BONUS_EXCLUDED:
+        return base
     return max(1, int(base * rebirth_bonus(rebirth)))
+
+
+def bonus_preview(amount: int, rebirth: int, feature: str = "") -> str:
+    """生成「原始值 → 加成后」的预告文案。
+
+    预告与实发**必须共用同一个函数**，否则后台配 30、实际给 42 这种
+    「说了不算」的问题会一再复发。有加成时返回 ``"30（转生加成后 42）"``，
+    无加成时返回 ``"42"``。
+
+    Args:
+        amount: 原始奖励。
+        rebirth: 转生次数。
+        feature: 玩法标识。
+
+    Returns:
+        可直接拼进消息的文案。
+    """
+    base = max(0, _safe_int(amount))
+    final = apply_bonus(base, rebirth, feature)
+    if final == base:
+        return str(base)
+    return f"{base}（转生加成后 {final}）"
 
 
 def can_rebirth(level: int, rebirth: int) -> bool:

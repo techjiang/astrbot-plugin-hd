@@ -464,7 +464,13 @@ async def main() -> int:
     )
     await run("领取单个", "领取 sign", ("完成，获得",), handler="cmd_claim")
     await run("领取一键", "领取", (), handler="cmd_claim")
+    # 余额兜底转正（签到 + 任务奖励），抽奖才有钱可花。
+    # 之前这里依赖「余额不足」并通过，可那时余额只是碰巧小于 20 ——
+    # 只要奖励数值一调（本轮就调了），断言就假红。
+    plugin.store.get_user("aiocqhttp_group_888", "1001")["balance"] = 0
     await run("抽奖(余额不足)", "抽奖", ("积分不足",), handler="cmd_lottery")
+    plugin.store.get_user("aiocqhttp_group_888", "1001")["balance"] = 200
+    await run("抽奖", "抽奖", ("抽奖结果", "净变动"), handler="cmd_lottery")
 
     # 猜数字
     await run("猜数字开始", "猜数字", ("猜数字开始",), handler="cmd_guess_start")
