@@ -186,6 +186,11 @@ COMMAND_NAMES: tuple[str, ...] = (
     "rank",
     "玩法",
     "状态",
+    # ---- v1.4.4 新增指令与别名：战力公式 ----
+    "战力",
+    "power",
+    "战力公式",
+    "计算公式",
     # ---- v1.3.0 新增指令与别名：世界线 / 赛季 / 养成 ----
     "讨伐",
     "开boss",
@@ -430,6 +435,14 @@ class InteractionPlugin(Star):
         self._chain_hint_at: dict[str, float] = {}
         self._cleanup_task: asyncio.Task | None = None
         self._rng = random.Random()
+        # 抽奖奖池缓存：按配置内容做失效判断（WebUI 改奖池后热更新）
+        self._pool_cache: list[tuple[int, str, str, int]] = list(games.LOTTERY_POOL)
+        self._pool_signature: str | None = None
+        # 自定义商店缓存：同上
+        self._shop_cache: dict[str, tuple[str, int, str, str]] = dict(
+            games_extra.SHOP_ITEMS
+        )
+        self._shop_signature: str | None = None
         # 关键词规则缓存：(规则版本号, 编译结果)
         self._keyword_cache: tuple[int, list[tuple[str, str, bool]]] | None = None
         self._keyword_version = 0
@@ -1041,6 +1054,7 @@ class InteractionPlugin(Star):
         reg(self.cmd_pet_name, "起名", "改名", "petname")
         reg(self.cmd_rebirth, "转生", "重生", "rebirth")
         reg(self.cmd_bonus, "我的加成", "加成", "bonus")
+        reg(self.cmd_power, "战力", "power", "战力公式", "计算公式")
 
         # 第四批扩展：群体竞技与协作
         reg(self.cmd_auction, "拍卖", "拍卖场", "卖场", "auction")
@@ -1456,7 +1470,7 @@ class InteractionPlugin(Star):
             if times:
                 extra = games_plus.apply_bonus(reward, times) - reward
                 if extra:
-                    user["balance"] = int(user["balance"]) + extra
+                    self.store.add_balance(key, uid, extra)
                     bonus_note = f"（转生加成 +{extra}）"
             bonus_note += self._achievement_scan(user)
         await self.store.save(key)
@@ -1541,14 +1555,21 @@ class InteractionPlugin(Star):
         key = self._session_key(event)
         uid, name = self._sender(event)
         user = self.store.get_user(key, uid)
+        pool = self._lottery_pool()
+        bonus_on = self._lottery_bonus_on()
         ok, delta, prize, err = games.lottery_draw(
             user,
-            self._int("lottery", "cost", default=20),
+            self._lottery_cost(pool),
             self._int("lottery", "cooldown_seconds", default=30),
             rng=self._rng,
+            pool=pool,
+            apply_bonus=bonus_on,
+            rebirth=int(user.get("rebirth", 0) or 0),
         )
         if ok:
             games.bump_daily(user, "lottery")
+            # 只把「奖金」记成绩：成本属于消费，不该抵扣赛季增量
+            self._credit_season(user, max(0, delta + self._lottery_cost(pool)))
         await self.store.save(key)
         if not ok:
             return event.plain_result(f"@{name} {err}")
@@ -1556,6 +1577,48 @@ class InteractionPlugin(Star):
             f"@{name} 抽奖结果：{prize}\n"
             f"本次净变动 {delta:+d}，余额 {user['balance']} {self._unit}。"
         )
+
+    # ------------------------------------------------------------------ 抽奖参数
+
+    def _lottery_pool(self) -> list[tuple[int, str, str, int]]:
+        """当前生效的抽奖奖池。
+
+        ``lottery.pool`` 是 ``template_list``：管理员可在 WebUI 里随意增删
+        条目。这里缓存解析结果，并按配置内容做失效判断（配置热更新时重建）。
+
+        Returns:
+            ``[(权重, 类型, 文案, 数值), ...]``。
+        """
+        raw = self._cfg("lottery", "pool", default=[])
+        signature = repr(raw)
+        if self._pool_signature == signature:
+            return self._pool_cache
+        self._pool_cache = games.lottery_pool(raw)
+        self._pool_signature = signature
+        return self._pool_cache
+
+    def _lottery_bonus_on(self) -> bool:
+        """抽奖是否享受转生加成（默认关闭）。"""
+        return self._bool("lottery", "bonus_enabled", default=False)
+
+    def _lottery_cost(self, pool: list[tuple[int, str, str, int]]) -> int:
+        """当前生效的单次抽奖消耗。
+
+        奖池被改过之后，「原价」可能已经低于期望回报。这里按奖池反推一个
+        安全下限并把配置价抬上去，保证任何奖池配置下抽奖都只是回收积分，
+        不会变成印钞机。转生加成开启时，还要再按最高倍率压一遍。
+
+        Args:
+            pool: 当前奖池。
+
+        Returns:
+            实际的单次消耗。
+        """
+        floor = games.lottery_cost_floor(pool)
+        if self._lottery_bonus_on():
+            top = games_plus.rebirth_bonus(games_plus.REBIRTH_MAX)
+            floor = int(floor * top) + 1
+        return max(floor, max(0, self._int("lottery", "cost", default=20)))
 
     # ------------------------------------------------------------------ 猜数字
 
@@ -1633,7 +1696,8 @@ class InteractionPlugin(Star):
                     self._guess_reward(), int(user.get("rebirth", 0) or 0)
                 )
                 user["guess_win"] = int(user.get("guess_win", 0) or 0) + 1
-                user["balance"] = int(user.get("balance", 0) or 0) + reward
+                # 走 add_balance：赛季增量等派生统计只在这里维护
+                self.store.add_balance(key, uid, reward)
                 games.bump_daily(user, "guess")
                 hint += f" 奖励 {reward} {self._unit}！{self._achievement_scan(user)}"
                 await self.store.save(key, force=True)
@@ -1715,7 +1779,7 @@ class InteractionPlugin(Star):
             int(user.get("rebirth", 0) or 0),
         )
         user["chain_win"] = int(user.get("chain_win", 0) or 0) + 1
-        user["balance"] = int(user.get("balance", 0) or 0) + reward
+        self.store.add_balance(key, uid, reward)
         games.bump_daily(user, "chain")
         await self.store.save(key)
         flavor = self._rng.choice(games.CHAIN_FLAVORS)
@@ -2160,7 +2224,7 @@ class InteractionPlugin(Star):
             )
         user["lucky_last"] = today
         user["lucky_hit"] = int(user.get("lucky_hit", 0) or 0) + 1
-        user["balance"] = int(user.get("balance", 0) or 0) + reward
+        self.store.add_balance(key, uid, reward)
         await self.store.save(key, force=True)
         return event.plain_result(
             f"🎉 @{name} 猜对了！今天的幸运数字就是 {lucky}，"
@@ -2242,6 +2306,7 @@ class InteractionPlugin(Star):
             "\n"
             "【成长】\n"
             "成就 ｜ 转生 [确认] ｜ 我的加成（含今日折扣）\n"
+            "战力 [@某人]（含完整计算公式，系数全部公开）\n"
             "标签 [稀有|分类|已获得] ｜ 标签搜索 <关键词>\n"
             "赛季 → 赛季 领取 ｜ 宠物 → 喂食 / 起名 <名字>\n"
             "\n"
@@ -2492,7 +2557,7 @@ class InteractionPlugin(Star):
         reward = max(0, self._int("bomb", "reward", default=1))
         user["bomb_win"] = int(user.get("bomb_win", 0) or 0) + 1
         if reward:
-            user["balance"] = int(user.get("balance", 0) or 0) + reward
+            self.store.add_balance(key, uid, reward)
         games.bump_daily(user, "bomb")
         await self.store.save(key)
         return event.plain_result(f"@{name} {msg}（+{reward} {self._unit}）")
@@ -2565,7 +2630,7 @@ class InteractionPlugin(Star):
         reward = max(0, self._int("riddle", "reward", default=20))
         user = self.store.get_user(key, uid)
         user["name"] = name
-        user["balance"] = int(user.get("balance", 0) or 0) + reward
+        self.store.add_balance(key, uid, reward)
         user["riddle_win"] = int(user.get("riddle_win", 0) or 0) + 1
         games.bump_daily(user, "riddle")
         await self.store.save(key, force=True)
@@ -2677,7 +2742,7 @@ class InteractionPlugin(Star):
         reward = game.reward
         user = self.store.get_user(key, uid)
         user["name"] = name
-        user["balance"] = int(user.get("balance", 0) or 0) + reward
+        self.store.add_balance(key, uid, reward)
         games.bump_daily(user, "rush")
         await self.store.save(key, force=True)
         return event.plain_result(
@@ -2740,7 +2805,7 @@ class InteractionPlugin(Star):
                 price,
                 item_kind,
                 desc,
-            ) in games_extra.SHOP_ITEMS.items():
+            ) in self._shop_items().items():
                 if item_kind != kind:
                     continue
                 shown = games_plus.discounted_price(price, percent)
@@ -2752,6 +2817,23 @@ class InteractionPlugin(Star):
                 lines.append(f"· {name} —— {price_text}（{desc}）")
         lines.append("发送「购买 <道具名>」即可购买，例如：购买 称号·大佬")
         return event.plain_result("\n".join(lines))
+
+    def _shop_items(self) -> dict[str, tuple[str, int, str, str]]:
+        """当前生效的商品表（内置 + 管理员自定义）。
+
+        ``shop.items`` 允许管理员自建商品；同名商品以自定义项为准，
+        这样「改价」不用改代码。解析结果按配置内容缓存。
+
+        Returns:
+            ``{道具ID: (名称, 价格, 类型, 说明)}``。
+        """
+        raw = self._cfg("shop", "items", default=[])
+        signature = repr(raw)
+        if self._shop_signature == signature:
+            return self._shop_cache
+        self._shop_cache = games_extra.merge_shop(games_extra.custom_items(raw))
+        self._shop_signature = signature
+        return self._shop_cache
 
     @filter.command("购买", alias={"buy", "兑换"})
     async def cmd_buy(
@@ -2771,7 +2853,7 @@ class InteractionPlugin(Star):
         query = args.strip() or self._args(event).strip()
         if not query:
             return event.plain_result("用法：购买 <道具名>，可先发「商店」查看列表。")
-        found = games_extra.resolve_shop_item(query)
+        found = games_extra.resolve_shop_item(query, self._shop_items())
         if not found:
             return event.plain_result(
                 f"没有找到道具「{query}」，可发「商店」查看列表。"
@@ -2840,10 +2922,7 @@ class InteractionPlugin(Star):
         bag = user.get("bag") or {}
         lines = [f"🎒 {name} 的背包"]
         if bag:
-            lines += [
-                f"· {games_extra.item_display_name(iid)} ×{cnt}"
-                for iid, cnt in bag.items()
-            ]
+            lines += [f"· {self._shop_name(iid)} ×{cnt}" for iid, cnt in bag.items()]
         else:
             lines.append("（空空如也）")
         titles = user.get("titles") or []
@@ -3262,7 +3341,8 @@ class InteractionPlugin(Star):
             _back, share = games_plus.wager_payout(
                 amount, odds, losers_pool=losses, winner_pool=winner_pool
             )
-            user["balance"] = int(user.get("balance", 0) or 0) + amount + share
+            # 本金是自己的钱，退回不算成绩；只有彩金 share 计入赛季增量
+            self.store.add_balance(key, uid, amount + share)
             user["wager_win"] = int(user.get("wager_win", 0) or 0) + 1
             sign = f"+{share}" if share > 0 else "±0"
             winners.append(f"{self.store.display_name(key, uid)} {sign}")
@@ -3352,7 +3432,7 @@ class InteractionPlugin(Star):
             if result == "win":
                 user["rebirth"] = int(user.get("rebirth", 0) or 0)
                 gain = games_plus.apply_bonus(reward, user["rebirth"])
-                user["balance"] = int(user.get("balance", 0) or 0) + gain
+                self.store.add_balance(key, uid, gain)
                 user["ttt_win"] = int(user.get("ttt_win", 0) or 0) + 1
                 tail_extra = f"\n+{gain} {self._unit}"
             elif result == "lose":
@@ -3438,13 +3518,15 @@ class InteractionPlugin(Star):
         per = max(0, self._int("mine", "reward_per_cell", default=1))
         gain = len(opened) * per
         gain = games_plus.apply_bonus(gain, int(user.get("rebirth", 0) or 0))
-        user["balance"] = int(user.get("balance", 0) or 0) + gain
+        if gain:
+            self.store.add_balance(key, uid, gain)
         user["mine_open"] = int(user.get("mine_open", 0) or 0) + len(opened)
         tail = ""
         if game.cleared():
             bonus = max(0, self._int("mine", "clear_reward", default=80))
             bonus = games_plus.apply_bonus(bonus, int(user.get("rebirth", 0) or 0))
-            user["balance"] = int(user.get("balance", 0) or 0) + bonus
+            if bonus:
+                self.store.add_balance(key, uid, bonus)
             user["mine_clear"] = int(user.get("mine_clear", 0) or 0) + 1
             self._mines.pop(key, None)
             tail = f"\n🧹 通关奖励 {bonus} {self._unit}！"
@@ -3516,14 +3598,14 @@ class InteractionPlugin(Star):
             if result == "win":
                 reward = max(0, self._int("codebreaker", "reward", default=120))
                 gain = games_plus.apply_bonus(reward, int(user.get("rebirth", 0) or 0))
-                user["balance"] = int(user.get("balance", 0) or 0) + gain
+                self.store.add_balance(key, uid, gain)
                 user["code_win"] = int(user.get("code_win", 0) or 0) + 1
                 extra = max(0, game.max_attempts - game.attempts)
                 spot_extra = extra * max(
                     0, self._int("codebreaker", "early_bonus", default=10)
                 )
                 if spot_extra:
-                    user["balance"] = int(user["balance"]) + spot_extra
+                    self.store.add_balance(key, uid, spot_extra)
                 tail = f" 奖励 {gain} {self._unit}"
                 if spot_extra:
                     tail += f"（提前 {extra} 次完成，额外 +{spot_extra}）"
@@ -3686,9 +3768,11 @@ class InteractionPlugin(Star):
         lines = [f"🎡 @{name} 大转盘 {times} 连抽（消耗 {total_cost} {self._unit}）"]
         # ``wheel_spin`` 返回的 delta 已扣掉本次消耗，累加即为真实净变动。
         net = 0
+        payout_total = 0
         for _ in range(times):
             kind, delta, label = games_plus.wheel_spin(cost, self._rng)
             net += delta
+            payout_total += delta + cost
             lines.append(f"· {label}")
             if kind == "item":
                 titles = user.setdefault("titles", [])
@@ -3698,7 +3782,12 @@ class InteractionPlugin(Star):
         # 转盘是**回收型玩法**：奖池期望本就低于消耗（回收率 ≈ 91%）。
         # 转生加成会把这个期望按倍率放大，转生 2 次（×1.10）后期望即翻正，
         # 变成「转得越多、赚得越多」的印钞机 —— 故转盘不享受转生加成。
-        user["balance"] = max(0, int(user["balance"]) + net)
+        # 这笔净变动是「多次转动叠加」的结果，必须逐次记账：
+        # 直接记 net 会在整体亏损时把某几次中奖也抹掉。先扣掉总成本，
+        # 再按每次的实际派彩补回，赛季增量只吃正数。
+        user["balance"] = max(0, int(user["balance"]) - total_cost)
+        self._credit_season(user, payout_total)
+        user["balance"] = int(user["balance"]) + payout_total
         user["wheel_count"] = int(user.get("wheel_count", 0) or 0) + times
         user["last_wheel_ts"] = now
         games.bump_daily(user, "wheel")
@@ -3949,7 +4038,7 @@ class InteractionPlugin(Star):
         season = games_world.season_of(games.today_str())
         self._season_sync(user, season)
         gain = int(user.get("season_gain", 0) or 0)
-        stage, _next, _remain = games_world.season_progress(gain)
+        stage, _next, _remain = games_world.season_progress(gain, self._season_tiers())
         return event.plain_result(
             f"⚡ @{name} 的加成\n"
             f"转生 {times} 次｜收益加成 ×{games_plus.rebirth_bonus(times):.2f}\n"
@@ -3958,6 +4047,39 @@ class InteractionPlugin(Star):
             f"宠物 {pet_name}（产出 +{pet_bonus}）\n"
             f"今日折扣：{games_plus.discount_text(percent)}"
         )
+
+    @filter.command("战力", alias={"power", "战力公式", "计算公式"})
+    async def cmd_power(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """查看战力与计算公式（可 @ 他人）。"""
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        key = self._session_key(event)
+        raw = args.strip() or self._args(event).strip()
+        target = self._target_or_self(event, raw)
+        uid, _self_name = self._sender(event)
+        user = self.store.get_user(key, target)
+        name = self.store.display_name(key, target)
+        rows = games_plus.power_breakdown(user)
+        total = games_plus.power_of(user)
+        lines = [f"⚔️ {name} 的战力：{total}"]
+        if rows:
+            for label, value, factor, contribution in rows:
+                lines.append(f"· {label} {value} × {factor:g} = {contribution}")
+        else:
+            lines.append("· 还没有任何战力来源，先签到攒起来吧。")
+        lines.append("")
+        lines.append("📐 战力公式（全部系数公开，见下）")
+        formula = " + ".join(
+            f"{label}×{factor:g}" for _field, label, factor in games_plus.POWER_FACTORS
+        )
+        lines.append(formula)
+        lines.append("战力只用于展示与对比，不参与任何结算，不会影响你挣多少。")
+        if target != uid:
+            lines.append("（「战力 @某人」可查看他人）")
+        await self.store.save(key)
+        return event.plain_result("\n".join(lines))
 
     # ------------------------------------------------------------------ 第三批扩展：世界线 / 赛季 / 养成（v1.3.0）
 
@@ -4143,60 +4265,113 @@ class InteractionPlugin(Star):
         user = self.store.get_user(key, uid)
         user["name"] = name
         season = games_world.season_of(games.today_str())
+        # 跨赛季时会就地归零，下面的 save 会把结果落盘
         self._season_sync(user, season)
         gain = int(user.get("season_gain", 0) or 0)
-        stage, next_stage, remain = games_world.season_progress(gain)
-        reward = games_world.season_reward(gain)
-        claimed = int(user.get("season_reward", 0) or 0)
+        tiers = self._season_tiers()
+        # 本季增量在「未获得任何加成」时会停在 0，此时段位应看 0 档而不是
+        # 上一赛季残留的进度；这里显式用 gain 计算，不带任何隐含偏置。
+        stage, next_stage, remain = games_world.season_progress(gain, tiers)
+        pending = games_world.season_pending(gain, tiers)
+        claimed_tier = int(user.get("season_tier", 0) or 0)
         raw = (args.strip() or self._args(event).strip()).strip()
 
         if raw in ("领取", "领奖", "claim", "领"):
-            if reward <= claimed:
+            # 按「已领到第几档」记账，而不是记「已领多少奖励」：
+            # 后者一旦管理员调整了档位奖励（本版新增的自定义能力），
+            # 玩家会凭空多领或少领，且永远补不平。
+            todo = [row for row in pending if row[0] > claimed_tier]
+            if not todo:
                 return event.plain_result(
                     f"@{name} 本季（{season}）没有可领的奖励，"
-                    f"当前段位「{stage}」已领满（已领 {claimed}）。"
+                    f"当前段位「{stage}」已领满（已领 {claimed_tier} 档）。"
                 )
-            diff = reward - claimed
-            user["season_reward"] = reward
-            self.store.add_balance(key, uid, diff)
+            total = sum(reward for _index, _tier_name, reward in todo)
+            names = "、".join(tier_name for _index, tier_name, _reward in todo)
+            user["season_tier"] = todo[-1][0]
+            user["season_reward"] = int(user.get("season_reward", 0) or 0) + total
+            if total:
+                self.store.add_balance(key, uid, total)
             self._achievement_scan(user)
             await self.store.save(key, force=True)
             return event.plain_result(
-                f"@{name} 领取了「{stage}」段位奖励 {diff} {self._unit}！\n"
+                f"@{name} 领取了「{names}」段位奖励 {total} {self._unit}！\n"
                 f"当前余额 {int(user.get('balance', 0) or 0)} {self._unit}"
             )
 
+        reward = games_world.season_reward(gain, tiers)
         lines = [
             f"🏆 @{name} 的赛季 · {season}",
-            f"本季积分增量 {gain}｜段位 {stage}",
+            f"本季积分增量 {gain}｜段位 {stage}（共 {len(tiers)} 档）",
             (
                 f"距离「{next_stage}」还差 {remain} 积分"
                 if remain
                 else "已到最高段位，稳住！"
             ),
-            f"结算可得 {reward} {self._unit}（已领 {claimed}）",
+            f"结算可得 {reward} {self._unit}（已领 {claimed_tier}/{len(pending)} 档）",
         ]
-        if reward > claimed:
-            lines.append("发送「赛季 领取」立即领取当前段位奖励。")
+        waiting = [row for row in pending if row[0] > claimed_tier]
+        if waiting:
+            pending_total = sum(r for _i, _n, r in waiting)
+            lines.append(
+                f"待领取 {len(waiting)} 档合计 {pending_total} {self._unit}，"
+                "发送「赛季 领取」立即领取。"
+            )
         elif reward:
             lines.append("本季奖励已领满，继续冲下一段位吧。")
         await self.store.save(key)
         return event.plain_result("\n".join(lines))
 
-    def _season_sync(self, user: dict, season: str) -> None:
+    @staticmethod
+    def _credit_season(user: dict, delta: int) -> None:
+        """把「净赚」的积分补记进赛季增量。
+
+        绝大多数玩法直接走 ``store.add_balance()``，赛季增量在那边统一维护。
+        但抽奖 / 大转盘这类「先扣成本、再发奖金」的玩法，余额是在
+        ``games`` 层一次性改完的，调用方拿不到中间量，于是赛季增量会漏记 ——
+        表现就是「PK 涨分算成绩，抽奖涨分不算」（用户反馈的原话）。
+
+        这里按「本次净赚」补一笔，只补正数：亏钱的次数不该倒扣成绩。
+
+        Args:
+            user: 用户档案（就地更新）。
+            delta: 本次结算的积分净变化。
+        """
+        if delta > 0:
+            user["season_gain"] = max(0, int(user.get("season_gain", 0) or 0)) + delta
+
+    def _season_tiers(self) -> list[tuple[int, str, int]]:
+        """当前生效的赛季档位表（来自 ``season.tiers`` 配置）。
+
+        Returns:
+            升序排列的 ``[(阈值, 段位名, 奖励), ...]``。
+        """
+        return games_world.season_tiers(self._cfg("season", "tiers", default=[]))
+
+    @staticmethod
+    def _season_sync(user: dict, season: str) -> bool:
         """在赛季切换时重置本季增量。
 
         只重置「增量」而不动总积分，避免跨月时伤害玩家资产。
 
+        注意：即使 ``season_tag`` 为空也会归零 —— 否则旧版本（没有赛季字段）
+        的档案会把自己历史上的全部余额算成「本季增量」，一上来就白送王者档。
+        第一次调用返回 ``True`` 表示「刚归零」，调用方据此标记脏数据。
+
         Args:
             user: 用户档案（就地更新）。
             season: 当前赛季标识。
+
+        Returns:
+            是否发生了归零（调用方需要落盘）。
         """
         if str(user.get("season_tag") or "") == season:
-            return
+            return False
         user["season_tag"] = season
         user["season_gain"] = 0
         user["season_reward"] = 0
+        user["season_tier"] = 0
+        return True
 
     @filter.command("宠物", alias={"pet", "养宠", "宠物状态"})
     async def cmd_pet(
@@ -4258,7 +4433,7 @@ class InteractionPlugin(Star):
         user["pet"] = pet.to_dict()
         gain = games_world.pet_gain(pet.care, self._rng)
         if gain:
-            user["balance"] = int(user.get("balance", 0) or 0) + gain
+            self.store.add_balance(key, uid, gain)
         after_code, after_name, bonus = games_world.pet_stage(pet.care)
         lines = [
             f"@{name} 照料了「{pet.name or '未命名'}」",
@@ -4396,7 +4571,35 @@ class InteractionPlugin(Star):
         Returns:
             ``(道具ID, 名称, 价格, 类型, 说明)``；未命中返回 ``None``。
         """
-        return games_extra.resolve_shop_item(query)
+        return games_extra.resolve_shop_item(query, self._shop_items())
+
+    @staticmethod
+    def _item_short_name(item_id: str, name: str = "") -> str:
+        """把道具全名收敛成玩家持有列表里的短名。
+
+        称号 / 头像框在用户档案里只存短名（``称号·大佬`` -> ``大佬``），
+        自定义商品可能根本不带「·」分隔符，此时原名即短名。
+
+        Args:
+            item_id: 道具 ID。
+            name: 道具全名；为空时按内置表反查。
+
+        Returns:
+            短名。
+        """
+        full = name or games_extra.item_display_name(item_id)
+        return full.split("·", 1)[-1] if "·" in full else full
+
+    def _shop_name(self, item_id: str) -> str:
+        """道具 ID 转展示名（含管理员自定义商品）。
+
+        Args:
+            item_id: 道具 ID。
+
+        Returns:
+            展示名；未知 ID 原样返回。
+        """
+        return games_extra.item_display_name(item_id, self._shop_items())
 
     @staticmethod
     def _has_item(user: dict, item_id: str, kind: str = "") -> bool:
@@ -4414,7 +4617,7 @@ class InteractionPlugin(Star):
             是否持有。
         """
         name = games_extra.item_display_name(item_id)
-        short = name.split("·", 1)[-1]
+        short = InteractionPlugin._item_short_name(item_id, name)
         if kind in ("", "title") and short in (user.get("titles") or []):
             return True
         if kind in ("", "frame") and short in (user.get("frames") or []):
@@ -4437,7 +4640,7 @@ class InteractionPlugin(Star):
             是否成功移出。
         """
         name = games_extra.item_display_name(item_id)
-        short = name.split("·", 1)[-1]
+        short = InteractionPlugin._item_short_name(item_id, name)
         if kind in ("", "title"):
             titles = list(user.get("titles") or [])
             if short in titles:
@@ -4473,7 +4676,7 @@ class InteractionPlugin(Star):
             kind: 道具类型。
         """
         name = games_extra.item_display_name(item_id)
-        short = name.split("·", 1)[-1]
+        short = InteractionPlugin._item_short_name(item_id, name)
         if kind == "title":
             titles = user.setdefault("titles", [])
             if short not in titles:
