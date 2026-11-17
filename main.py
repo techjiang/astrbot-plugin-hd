@@ -332,6 +332,19 @@ COMMAND_NAMES: tuple[str, ...] = (
     "help",
     "status",
     "8ball",
+    # ---- v1.5.0 挖矿玩法 ----
+    "挖矿",
+    "下矿",
+    "采矿",
+    "矿场",
+    "矿场信息",
+    "装备栏",
+    "佩戴装备",
+    "卸下装备",
+    "卸下",
+    "unequip",
+    "equip",
+    "mining",
 )
 
 # 插件标识，同时用作 ``data/plugin_data/<插件名>`` 下的数据子目录名。
@@ -1230,6 +1243,10 @@ class InteractionPlugin(Star):
         reg(self.cmd_soup_answer, "汤底", "soupanswer")
         reg(self.cmd_rush, "谁最先", "抢答", "rush", "手速")
         reg(self.cmd_fortune, "每日运势", "运势", "占卜", "fortune", "算命")
+        reg(self.cmd_mining, "挖矿", "下矿", "采矿", "mining")
+        reg(self.cmd_mining_info, "矿场", "矿场信息")
+        reg(self.cmd_equip, "装备栏", "佩戴装备", "equip")
+        reg(self.cmd_equip_off, "卸下装备", "卸下", "unequip")
         reg(self.cmd_shop, "称号", "商店", "shop", "道具店")
         reg(self.cmd_buy, "购买", "buy", "兑换")
         reg(self.cmd_bag, "背包", "道具", "bag", "inventory")
@@ -2557,6 +2574,7 @@ class InteractionPlugin(Star):
             "\n"
             "【商店与排行】\n"
             "商店 → 购买 <道具名> ｜ 背包 ｜ 佩戴 <称号名>\n"
+            "挖矿 ｜ 矿场 ｜ 装备栏 ｜ 装备 <挖矿装备> ｜ 卸下装备 <装备名>\n"
             f"排行榜 <维度>（{dims}）\n"
             "\n"
             "【成长】\n"
@@ -3042,6 +3060,140 @@ class InteractionPlugin(Star):
             f"今日忠告：{result['tip']}{tail}"
         )
 
+    @filter.command("挖矿", alias={"下矿", "采矿", "mine"})
+    async def cmd_mining(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """零成本挖矿：无次数限制、无入场费，奖励来自可配置矿场。"""
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if not self._bool("mining", "enabled", default=True):
+            return self._deny("挖矿场已关闭。")
+        key = self._session_key(event)
+        uid, name = self._sender(event)
+        user = self.store.get_user(key, uid)
+        user["name"] = name
+        ores = games_extra.mining_ore(self._cfg("mining", "pool", default=[]))
+        ore, amount = games_extra.mine(
+            ores,
+            user.get("equipped") or [],
+            self._cfg("mining", "equipment", default=[]),
+            self._rng,
+        )
+        self._grant(user, amount)
+        user["mine_count"] = games_extra._safe_int(user.get("mine_count"), 0) + 1
+        await self.store.save(key, force=True)
+        bonus = games_extra.mining_bonus(
+            user.get("equipped") or [], self._cfg("mining", "equipment", default=[])
+        )
+        tail = self._achievement_scan(user)
+        extra = f"｜装备加成 ×{1 + bonus:.2f}" if bonus else ""
+        return event.plain_result(
+            f"⛏️ @{name} 挖到了「{ore}」，获得 {amount} {self._unit}！"
+            f"{extra}\n累计挖矿 {user['mine_count']} 次。{tail}"
+        )
+
+    @filter.command("矿场", alias={"矿场信息", "mininginfo"})
+    async def cmd_mining_info(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """查看当前矿场奖池与自己的装备加成。"""
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if not self._bool("mining", "enabled", default=True):
+            return self._deny("挖矿场已关闭。")
+        key = self._session_key(event)
+        uid, name = self._sender(event)
+        user = self.store.get_user(key, uid)
+        user["name"] = name
+        ores = games_extra.mining_ore(self._cfg("mining", "pool", default=[]))
+        total = sum(w for _n, _v, w in ores)
+        lines = [f"🏞 矿场一览（货币：{self._unit}，零成本无限次）"]
+        for ore_name, value, weight in ores:
+            chance = weight / total * 100
+            lines.append(
+                f"· {ore_name} —— {value} {self._unit}（概率约 {chance:.2f}%）"
+            )
+        bonus = games_extra.mining_bonus(
+            user.get("equipped") or [], self._cfg("mining", "equipment", default=[])
+        )
+        equipped = user.get("equipped") or []
+        lines.append(
+            f"⚙️ 当前装备：{'、'.join(self._shop_name(iid) for iid in equipped) if equipped else '无'}"
+        )
+        lines.append(f"挖矿倍率：×{1 + bonus:.2f}（发送「挖矿」开始）")
+        return event.plain_result("\n".join(lines))
+
+    @filter.command("装备栏", alias={"佩戴装备", "equip"})
+    async def cmd_equip(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """装备背包里的挖矿装备。"""
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        key = self._session_key(event)
+        uid, name = self._sender(event)
+        user = self.store.get_user(key, uid)
+        user["name"] = name
+        query = args.strip() or self._args(event).strip()
+        if not query:
+            equipped = user.get("equipped") or []
+            lines = ["⚙️ 装备栏"]
+            for item_id in equipped:
+                lines.append(f"· {self._shop_name(item_id)}")
+            if not equipped:
+                lines.append("（空）")
+            lines.append("用法：装备 <道具名>，卸下装备 <道具名>")
+            return event.plain_result("\n".join(lines))
+        found = games_extra.resolve_shop_item(query, self._shop_items())
+        if not found or found[3] != "equipment":
+            return event.plain_result("这个道具不能装备，先发「背包」看看。")
+        item_id, item_name, _price, _kind, _desc = found
+        bag = user.setdefault("bag", {})
+        if int(bag.get(item_id, 0) or 0) <= 0:
+            return event.plain_result(f"背包里没有「{item_name}」，可去商店购买。")
+        equipped = user.setdefault("equipped", [])
+        if item_id in equipped:
+            return event.plain_result(f"「{item_name}」已经装备了。")
+        equipped.append(item_id)
+        await self.store.save(key, force=True)
+        bonus = games_extra.mining_bonus(
+            equipped, self._cfg("mining", "equipment", default=[])
+        )
+        return event.plain_result(
+            f"✅ 已装备「{item_name}」，当前挖矿倍率 ×{1 + bonus:.2f}。"
+        )
+
+    @filter.command("卸下装备", alias={"卸下", "unequip"})
+    async def cmd_equip_off(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> MessageEventResult | None:
+        """卸下已装备的挖矿装备。"""
+        if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        key = self._session_key(event)
+        uid, name = self._sender(event)
+        user = self.store.get_user(key, uid)
+        user["name"] = name
+        query = args.strip() or self._args(event).strip()
+        equipped = user.setdefault("equipped", [])
+        if not query:
+            if not equipped:
+                return event.plain_result("当前没有装备。")
+            query = self._shop_name(equipped[0])
+        found = games_extra.resolve_shop_item(query, self._shop_items())
+        item_id = found[0] if found else query
+        if item_id not in equipped:
+            return event.plain_result(f"没有装备「{query}」。")
+        equipped.remove(item_id)
+        await self.store.save(key, force=True)
+        bonus = games_extra.mining_bonus(
+            equipped, self._cfg("mining", "equipment", default=[])
+        )
+        return event.plain_result(
+            f"已卸下「{self._shop_name(item_id)}」，当前挖矿倍率 ×{1 + bonus:.2f}。"
+        )
+
     @filter.command("商店", alias={"称号", "shop", "道具店"})
     async def cmd_shop(
         self, event: AstrMessageEvent, args: str = ""
@@ -3058,6 +3210,7 @@ class InteractionPlugin(Star):
         for kind, header in (
             ("title", "【称号】"),
             ("frame", "【头像框】"),
+            ("equipment", "【挖矿装备】"),
             ("consumable", "【消耗品】"),
         ):
             lines.append(header)
@@ -3092,7 +3245,45 @@ class InteractionPlugin(Star):
         signature = repr(raw)
         if self._shop_signature == signature:
             return self._shop_cache
-        self._shop_cache = games_extra.merge_shop(games_extra.custom_items(raw))
+        items = games_extra.merge_shop(games_extra.custom_items(raw))
+        # v1.5.0：内置挖矿装备按设备类型进入商店，名称由矿镐名派生。
+        for item_id, (
+            label,
+            price,
+            kind,
+            bonus,
+            _desc,
+        ) in games_extra.MINING_EQUIPMENT.items():
+            if kind == "equipment" and all(
+                entry[0] != label for entry in items.values()
+            ):
+                items[item_id] = (
+                    label,
+                    price,
+                    "equipment",
+                    f"挖矿收益 +{bonus * 100:.0f}%。",
+                )
+        # v1.5.0：管理员可在 mining.equipment 里上架额外矿镐，按装备类型售卖。
+        # 名称冲突时仍以商店自定义项为准，这里只补缺失的条目。
+        custom_mine = self._cfg("mining", "equipment", default=[])
+        if isinstance(custom_mine, list):
+            baseline = {entry[0] for entry in items.values()}
+            for equip in custom_mine:
+                if not isinstance(equip, dict):
+                    continue
+                name = str(equip.get("name") or "").strip()
+                if not name or name in baseline:
+                    continue
+                bonus = min(max(0.0, float(equip.get("bonus") or 0)), 5.0)
+                eid = f"custom_mine_{abs(hash(name)) % 100000}"
+                items[eid] = (
+                    name,
+                    500,
+                    "equipment",
+                    f"挖矿收益 +{bonus * 100:.0f}%（管理员上架）。",
+                )
+                baseline.add(name)
+        self._shop_cache = items
         self._shop_signature = signature
         return self._shop_cache
 
@@ -3151,6 +3342,10 @@ class InteractionPlugin(Star):
                 )
             user.setdefault("frames", []).append(frame_name)
             note = f"\n已解锁头像框「{frame_name}」。"
+        elif kind == "equipment":
+            bag = user.setdefault("bag", {})
+            bag[item_id] = int(bag.get(item_id, 0) or 0) + 1
+            note = f"\n已放入背包，发送「装备 {name}」即可佩戴。"
         else:
             bag = user.setdefault("bag", {})
             bag[item_id] = int(bag.get(item_id, 0) or 0) + 1
@@ -3186,8 +3381,12 @@ class InteractionPlugin(Star):
             lines += [f"· {self._shop_name(iid)} ×{cnt}" for iid, cnt in bag.items()]
         else:
             lines.append("（空空如也）")
+        equipped = user.get("equipped") or []
+        lines.append(
+            f"\n⚙️ 装备栏：{'、'.join(self._shop_name(iid) for iid in equipped) if equipped else '空'}"
+        )
         titles = user.get("titles") or []
-        lines.append(f"\n🏷 已解锁称号：{'、'.join(titles) if titles else '暂无'}")
+        lines.append(f"🏷 已解锁称号：{'、'.join(titles) if titles else '暂无'}")
         lines.append(f"当前佩戴：{user.get('title') or '无'}")
         frames = user.get("frames") or []
         lines.append(f"🖼 头像框：{'、'.join(frames) if frames else '暂无'}")

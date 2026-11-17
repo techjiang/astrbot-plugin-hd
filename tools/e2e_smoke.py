@@ -1379,6 +1379,50 @@ async def main() -> int:
     await wake_free("免唤醒-冷却按键隔离", "转盘 2", ("太快",), uid=wf_uid)
     plugin.config["permission"]["cooldown_seconds"] = 0
 
+    # ---------- 4.5) 挖矿与装备 ----------
+    miner_uid = "9101"
+    miner_key = "aiocqhttp_group_888"
+    plugin.store.add_balance(miner_key, miner_uid, 2000)
+    await run(
+        "挖矿-零成本到账",
+        "挖矿",
+        ("挖到了", "获得"),
+        handler="cmd_mining",
+        uid=miner_uid,
+    )
+    await run(
+        "矿场-概率表",
+        "矿场",
+        ("矿场一览", "概率约"),
+        handler="cmd_mining_info",
+        uid=miner_uid,
+    )
+    await run(
+        "挖矿-购买装备",
+        "购买 灯光头盔",
+        ("购买成功",),
+        handler="cmd_buy",
+        uid=miner_uid,
+    )
+    await run(
+        "挖矿-佩戴装备",
+        "装备 灯光头盔",
+        ("已装备", "×1.10"),
+        handler="cmd_equip",
+        uid=miner_uid,
+    )
+    bag_out = await run(
+        "挖矿-背包装备栏", "背包", ("装备栏", "矿镐"), handler="cmd_bag", uid=miner_uid
+    )
+    assert "矿镐" in bag_out
+    await run(
+        "挖矿-卸下装备",
+        "卸下装备 灯光头盔",
+        ("已卸下",),
+        handler="cmd_equip_off",
+        uid=miner_uid,
+    )
+
     # ---------- 5) 脏配置兜底 ----------
     plugin.config["sign_in"]["min_reward"] = "abc"
     plugin.config["lottery"]["cost"] = None

@@ -91,6 +91,9 @@ USER_FIELDS: dict[str, Any] = {
     "season_gain": 0,  # 本季累计积分增量
     "season_reward": 0,  # 本季已领奖励合计（仅统计用）
     "season_tier": 0,  # 本季已领奖励对应的最高档位序号（1 起）
+    # ---- 第五批扩展玩法字段（v1.5.0）----
+    "mine_count": 0,  # 挖矿累计次数
+    "equipped": [],  # 已装备道具 ID（矿镐等）
 }
 
 

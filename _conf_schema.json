@@ -667,9 +667,10 @@
                 "options": [
                   "title",
                   "frame",
-                  "consumable"
+                  "consumable",
+                  "equipment"
                 ],
-                "hint": "title=称号，frame=头像框，consumable=消耗品/收藏品。"
+                "hint": "title=称号，frame=头像框，equipment=可佩戴装备，consumable=消耗品/收藏品。"
               },
               "desc": {
                 "description": "说明",
@@ -1260,6 +1261,86 @@
         "type": "bool",
         "default": true,
         "hint": "达成条件自动解锁并发放一次性奖励。"
+      }
+    }
+  },
+  "mining": {
+    "description": "挖矿场",
+    "type": "object",
+    "hint": "零成本、无次数限制的休闲产出玩法。默认奖池以低价值矿石为主，极小概率出大奖；装备加成只作用于这里。",
+    "items": {
+      "enabled": {
+        "description": "启用挖矿",
+        "type": "bool",
+        "default": true
+      },
+      "pool": {
+        "description": "矿场奖池",
+        "type": "template_list",
+        "default": [],
+        "hint": "留空使用内置矿场（3/5/10 为主，300/500/1000 极低概率）。自定义后整体替换内置奖池；权重越大越常见。",
+        "templates": {
+          "ore": {
+            "name": "矿石",
+            "items": {
+              "label": {
+                "description": "矿石名称",
+                "type": "string",
+                "default": "矿石",
+                "hint": "挖到时显示的名字。"
+              },
+              "value": {
+                "description": "基础积分",
+                "type": "int",
+                "default": 10,
+                "slider": {
+                  "min": 1,
+                  "max": 1000000,
+                  "step": 1
+                }
+              },
+              "weight": {
+                "description": "出现权重",
+                "type": "int",
+                "default": 10,
+                "slider": {
+                  "min": 1,
+                  "max": 100000,
+                  "step": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "equipment": {
+        "description": "自定义矿镐装备",
+        "type": "template_list",
+        "default": [],
+        "hint": "可上架额外挖矿装备；装备后按 bonus 叠加收益倍率，总加成上限 300%（最终倍率 ×4）。",
+        "templates": {
+          "equip": {
+            "name": "装备",
+            "items": {
+              "name": {
+                "description": "装备名称",
+                "type": "string",
+                "default": "矿镐"
+              },
+              "bonus": {
+                "description": "收益加成",
+                "type": "float",
+                "default": 0.1,
+                "slider": {
+                  "min": 0,
+                  "max": 5,
+                  "step": 0.01
+                },
+                "hint": "0.10 表示装备后挖矿收益 +10%。"
+              }
+            }
+          }
+        }
       }
     }
   }

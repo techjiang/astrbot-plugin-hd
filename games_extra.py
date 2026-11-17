@@ -838,3 +838,142 @@ def random_joke(rng: random.Random | None = None) -> str:
     """
     rng = rng or random
     return rng.choice(JOKES)
+
+
+# --------------------------------------------------------------------- 挖矿
+
+
+# 内置矿场：绝大多数是低价值矿石，极少数高价值矿脉。
+# 每项为 (名称, 积分, 权重)。权重越大越常见。
+MINING_MINE: tuple[tuple[str, int, int], ...] = (
+    ("普通矿石", 3, 50),
+    ("铜矿石", 5, 30),
+    ("银矿石", 10, 15),
+    ("金矿石", 300, 4),
+    ("钻石矿脉", 500, 1),
+    ("传说星矿", 1000, 1),
+)
+
+# 内置装备：名称 -> (展示 emoji, 价格, 类型, 加成, 说明)
+# 挖矿装备的加成是**倍率增量**：0.10 表示最终收益 ×1.10。
+MINING_EQUIPMENT: dict[str, tuple[str, int, str, float, str]] = {
+    "item_miner_pick": (
+        "矿镐·普通矿镐",
+        300,
+        "equipment",
+        0.05,
+        "矿镐：挖矿收益 +5%。",
+    ),
+    "item_miner_lamp": (
+        "矿镐·灯光头盔",
+        800,
+        "equipment",
+        0.10,
+        "灯光头盔：挖矿收益 +10%。",
+    ),
+    "item_miner_drill": (
+        "矿镐·强化钻机",
+        2000,
+        "equipment",
+        0.18,
+        "强化钻机：挖矿收益 +18%。",
+    ),
+}
+
+# 多重装备叠加时的收益上限，防止管理员配出「无限倍率」的装备。
+MINING_BONUS_CAP = 3.0
+# 单次挖矿奖励硬上限，防止自定义奖池配出天文数字。
+MINING_REWARD_CAP = 1_000_000
+
+
+def mining_ore(raw: object) -> tuple[tuple[str, int, int], ...]:
+    """把配置里的矿场奖池规整成 ``(名称, 积分, 权重)`` 列表。
+
+    管理员可以填空奖励、负数权重或半截条目；这里逐项兜住，
+    保证 :func:`mine` 不会因脏配置抛异常，也不会出现 0 权重导致死循环。
+
+    Args:
+        raw: ``mining.pool`` 配置值。
+
+    Returns:
+        规整后的矿场奖池；为空时回退到内置矿场。
+    """
+    ores: list[tuple[str, int, int]] = []
+    if isinstance(raw, list):
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            label = str(entry.get("label") or "矿石").strip() or "矿石"
+            value = min(max(1, _safe_int(entry.get("value"), 3)), MINING_REWARD_CAP)
+            weight = min(max(1, _safe_int(entry.get("weight"), 1)), 100000)
+            ores.append((label, value, weight))
+    return tuple(ores) if ores else MINING_MINE
+
+
+def mining_bonus(equipment_ids: object, custom: object = None) -> float:
+    """计算装备带来的挖矿倍率（cap 之前的增量）。
+
+    Args:
+        equipment_ids: 已装备的道具 ID 列表。
+        custom: 管理员自定义装备（``mining.equipment`` 原值）。
+
+    Returns:
+        加成增量，如 ``0.25`` 表示最终收益 ×1.25。
+    """
+    table = dict(MINING_EQUIPMENT)
+    if isinstance(custom, list):
+        for entry in custom:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                continue
+            bonus = min(max(0.0, float(entry.get("bonus") or 0)), 5.0)
+            item_id = f"custom_mine_{abs(hash(name)) % 100000}"
+            table[item_id] = ("⛏️", 1, "equipment", bonus, name)
+    total = 0.0
+    ids = set()
+    if isinstance(equipment_ids, (list, tuple, set)):
+        ids = {str(x) for x in equipment_ids}
+    for item_id in ids:
+        entry = table.get(item_id)
+        if entry and entry[2] in ("equipment", "consumable"):
+            total += min(max(0.0, float(entry[3] or 0)), 5.0)
+    return min(total, MINING_BONUS_CAP)
+
+
+def mine(
+    ores: tuple[tuple[str, int, int], ...],
+    equipment_ids: object = None,
+    custom_equipment: object = None,
+    rng: random.Random | None = None,
+) -> tuple[str, int]:
+    """执行一次挖矿，返回 ``(矿石名, 实得积分)``。
+
+    挖矿是**零成本、无上限**的产出玩法，靠低期望和长尾大奖维持趣味；
+    为避免它变成新的刷分路径，奖励上限由 :data:`MINING_REWARD_CAP` 约束，
+    装备倍率也有 :data:`MINING_BONUS_CAP` 封顶。
+
+    Args:
+        ores: :func:`mining_ore` 规整后的矿场奖池。
+        equipment_ids: 玩家已装备的道具 ID。
+        custom_equipment: 管理员自定义装备配置。
+        rng: 随机源，默认新建。
+
+    Returns:
+        ``(矿石名, 最终积分)``。
+    """
+    rng = rng or random
+    ores = ores or MINING_MINE
+    total_weight = sum(max(0, w) for _n, _v, w in ores)
+    ticket = rng.randint(1, total_weight)
+    cursor = 0
+    picked = ores[-1]
+    for ore in ores:
+        cursor += max(0, ore[2])
+        if ticket <= cursor:
+            picked = ore
+            break
+    multiplier = 1.0 + mining_bonus(equipment_ids, custom_equipment)
+    value = min(MINING_REWARD_CAP, int(picked[1] * multiplier))
+    return picked[0], value
