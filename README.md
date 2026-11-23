@@ -8,7 +8,7 @@
 
 让群聊真正热闹起来的一站式玩法合集
 
-[![version](https://img.shields.io/badge/version-v1.6.0-4f7cff)](./metadata.yaml)
+[![version](https://img.shields.io/badge/version-v1.7.0-4f7cff)](./metadata.yaml)
 [![astrbot](https://img.shields.io/badge/AstrBot-%3E%3D4.10%2C%20%3C5-22c55e)](https://astrbot.app)
 [![python](https://img.shields.io/badge/python-%3E%3D3.10-3776ab)](./pyproject.toml)
 [![deps](https://img.shields.io/badge/第三方依赖-0-ff9800)](./requirements.txt)
@@ -277,7 +277,7 @@ PK 赢来的赌注……都算），消费与亏损不抵扣。奖励可以按�
 
 ## 配置
 
-所有配置都在 AstrBot WebUI → 插件配置 里，41 个分组：
+所有配置都在 AstrBot WebUI → 插件配置 里，42 个分组：
 
 `enabled` · `currency_name` · `trigger` · `sign_in` · `lottery` ·
 `guess_number` · `word_chain` · `vote` · `rank` · `rob` · `dice` ·
@@ -286,7 +286,7 @@ PK 赢来的赌注……都算），消费与亏损不抵扣。奖励可以按�
 `wager` · `tictactoe` · `mine` · `codebreaker` · `coin` · `rpsls` ·
 `wheel` · `rebirth_play` · `boss` · `season` · `pet` ·
 `auction` · `tug` · `quiz` · `monopoly` ·
-`achievements` · `auto_reply` · `permission`
+`achievements` · `auto_reply` · `permission` · `limits`
 
 默认值开箱即用。打劫与掷骰默认关闭（这两个玩法对群氛围影响较大，
 由群主主动开启更合适）；其余玩法默认全开。
@@ -304,6 +304,23 @@ PK 赢来的赌注……都算），消费与亏损不抵扣。奖励可以按�
   始终豁免。默认不限流是因为真人手速下相邻两条指令常不足 1 秒，
   全局冷却会让「签到完接着查积分」直接吃拒绝。
 - `allow_list` 白名单 · `deny_list` 黑名单 · `admin_ids` 插件管理员
+
+**功能使用次数限制**（`limits` 分组，v1.7.0 新增）：
+
+防刷屏 / 防刷分。给每个**非赌博**玩法单独设置「每日次数上限」（每人），
+按「会话 + 用户 + 功能」计数，跨天自动清零，达到上限后当天不再响应。
+
+- `limits.enabled`：总开关
+- `limits.<功能>.enabled`：该功能的限制开关
+- `limits.<功能>.daily`：每日上限，`0` = 不限制（默认全部为 0，升级后行为不变）
+
+覆盖签到、猜数字、数字破解、接龙、掷骰、幸运数字、挖矿、Boss、投票等 30 项。
+**赌博 / 回收型玩法不参与**（抽奖、转盘、抛硬币、决斗盘、21 点、打劫、竞猜、
+PK、大富翁、拍卖、拔河、数字炸弹）—— 它们消耗积分，是经济系统的回收渠道。
+管理员（`permission.admin_ids` 与群主 / 全局管理员）不受限制，方便测试玩法。
+
+> 建议：把最容易被刷的 `codebreaker`（数字破解）、`guess`（猜数字）、
+> `mining`（挖矿）的 `daily` 设成 5~20，既能保留玩法，又不会一屏全是游戏。
 
 ### 想让群里的规则长得不一样？
 

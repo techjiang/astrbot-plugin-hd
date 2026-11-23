@@ -94,6 +94,10 @@ USER_FIELDS: dict[str, Any] = {
     # ---- 第五批扩展玩法字段（v1.5.0）----
     "mine_count": 0,  # 挖矿累计次数
     "equipped": [],  # 已装备道具 ID（矿镐等）
+    # ---- 第六批字段（v1.7.0）功能使用次数限制 ----
+    # usage_date 与 usage_counts 配套：日期变化即自动清零，无需定时任务
+    "usage_date": "",  # 计数所属日期（YYYY-MM-DD）
+    "usage_counts": {},  # 功能键 -> 当日已用次数
 }
 
 

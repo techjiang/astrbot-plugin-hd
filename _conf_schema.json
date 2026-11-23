@@ -1343,5 +1343,677 @@
         }
       }
     }
+  },
+  "limits": {
+    "description": "功能使用次数限制（防刷屏 / 防刷分）",
+    "type": "object",
+    "hint": "给每个非赌博玩法单独设置每日次数上限，防止有人刷屏、刷分导致经济崩盘。赌博与回收型玩法（抽奖/转盘/抛硬币/决斗盘/21点/打劫/竞猜/PK/大富翁/拍卖/拔河/炸弹）不在此列，它们消耗积分，不受限制。管理员不受限制。每项 daily=0 表示不限制；开关关闭同样不限制。",
+    "items": {
+      "enabled": {
+        "description": "总开关：启用功能次数限制",
+        "type": "bool",
+        "default": true
+      },
+      "sign": {
+        "description": "「签到」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「签到」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「签到」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "guess": {
+        "description": "「猜数字」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「猜数字」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「猜数字」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "codebreaker": {
+        "description": "「数字破解」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「数字破解」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「数字破解」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "chain": {
+        "description": "「词语接龙」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「词语接龙」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「词语接龙」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "dice": {
+        "description": "「掷骰子」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「掷骰子」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「掷骰子」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "lucky": {
+        "description": "「幸运数字」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「幸运数字」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「幸运数字」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "eight_ball": {
+        "description": "「魔法八球」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「魔法八球」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「魔法八球」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "roast": {
+        "description": "「扎心」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「扎心」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「扎心」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "riddle": {
+        "description": "「猜谜」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「猜谜」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「猜谜」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "turtle_soup": {
+        "description": "「海龟汤」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「海龟汤」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「海龟汤」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "rush": {
+        "description": "「抢答」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「抢答」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「抢答」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "fortune": {
+        "description": "「每日运势」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「每日运势」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「每日运势」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "mining": {
+        "description": "「挖矿」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「挖矿」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「挖矿」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "quest": {
+        "description": "「每日任务」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「每日任务」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「每日任务」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "claim": {
+        "description": "「领取任务奖励」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「领取任务奖励」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「领取任务奖励」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "pet": {
+        "description": "「宠物养成」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「宠物养成」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「宠物养成」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "quiz": {
+        "description": "「知识竞速」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「知识竞速」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「知识竞速」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "tictactoe": {
+        "description": "「井字棋」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「井字棋」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「井字棋」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "mine": {
+        "description": "「扫雷」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「扫雷」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「扫雷」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "boss": {
+        "description": "「群 Boss 战」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「群 Boss 战」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「群 Boss 战」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "rebirth": {
+        "description": "「转生」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「转生」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「转生」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "gift": {
+        "description": "「送礼」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「送礼」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「送礼」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "confess": {
+        "description": "「表白」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「表白」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「表白」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "random": {
+        "description": "「随机选择」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「随机选择」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「随机选择」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "joke": {
+        "description": "「冷笑话」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「冷笑话」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「冷笑话」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "vote": {
+        "description": "「投票」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「投票」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「投票」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "squad": {
+        "description": "「战队」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「战队」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「战队」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "shop": {
+        "description": "「购买商品」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「购买商品」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「购买商品」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "transfer": {
+        "description": "「转账」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「转账」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「转账」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      },
+      "season": {
+        "description": "「赛季奖励」限制",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用「赛季奖励」次数限制",
+            "type": "bool",
+            "default": true
+          },
+          "daily": {
+            "description": "「赛季奖励」每日次数上限（每人）",
+            "type": "int",
+            "default": 0,
+            "slider": {
+              "min": 0,
+              "max": 1000,
+              "step": 1
+            },
+            "hint": "0 表示不限制。超过上限后该玩法当天不再响应，次日自动清零。"
+          }
+        }
+      }
+    }
   }
 }

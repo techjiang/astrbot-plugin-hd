@@ -56,6 +56,67 @@ _WAGER_COMMANDS: tuple[str, ...] = (
     "wager",
 )
 
+# ---------------------------------------------------------------------------
+# 功能使用次数限制（v1.7.0）
+#
+# 目的：群里最容易刷屏、刷分的是「不消耗积分、直接产出积分」的玩法
+# （尤以数字破解为甚 —— 有人一下午靠它刷到 33000）。仅靠调奖励数值
+# 压不住，所以给每个非赌博玩法提供独立的「每日次数上限」。
+#
+# 赌博 / 回收型玩法**不参与限制**（用户明确要求）：它们本身消耗积分，
+# 是经济系统的回收渠道，放开反而有益。这个集合里的功能即使写了 limits
+# 配置也不会被限制，schema 里也不会出现对应条目。
+GAMBLING_FEATURES: frozenset[str] = frozenset(
+    {
+        "lottery",  # 抽奖
+        "wheel",  # 大转盘
+        "coin",  # 抛硬币
+        "rpsls",  # 决斗盘
+        "blackjack",  # 21 点
+        "rob",  # 打劫
+        "wager",  # 竞猜 / 下注
+        "duel",  # PK 对决
+        "monopoly",  # 大富翁
+        "auction",  # 拍卖
+        "tug",  # 拔河
+        "bomb",  # 数字炸弹
+    }
+)
+
+# 功能键 -> 展示名，用于拒绝文案
+FEATURE_LABELS: dict[str, str] = {
+    "sign": "签到",
+    "guess": "猜数字",
+    "codebreaker": "数字破解",
+    "chain": "词语接龙",
+    "dice": "掷骰子",
+    "lucky": "幸运数字",
+    "eight_ball": "魔法八球",
+    "roast": "扎心",
+    "riddle": "猜谜",
+    "turtle_soup": "海龟汤",
+    "rush": "抢答",
+    "fortune": "每日运势",
+    "mining": "挖矿",
+    "quest": "每日任务",
+    "claim": "领取任务奖励",
+    "pet": "宠物养成",
+    "quiz": "知识竞速",
+    "tictactoe": "井字棋",
+    "mine": "扫雷",
+    "season": "赛季奖励",
+    "boss": "群 Boss 战",
+    "rebirth": "转生",
+    "gift": "送礼",
+    "confess": "表白",
+    "random": "随机选择",
+    "joke": "冷笑话",
+    "vote": "投票",
+    "squad": "战队",
+    "shop": "购买商品",
+    "transfer": "转账",
+}
+
 COMMAND_NAMES: tuple[str, ...] = (
     "互动状态",
     "互动帮助",
@@ -901,6 +962,10 @@ class InteractionPlugin(Star):
     def _guard(self, event: AstrMessageEvent, command: str = "") -> str | None:
         """通用前置检查：总开关、群聊限制、冷却。
 
+        功能次数限制不在这里做——它由各 handler 显式调用 ``_usage_check``，
+        因为只有 handler 自己知道该记到哪个功能键上（同一功能可能有多个
+        入口，如「喂食」计入宠物）。
+
         冷却按「会话 + 用户 + 指令」三维隔离，而不是整个插件共用一个时间戳。
         原因是历史上这里只有一个 ``key = 会话:用户``：群里先发「签到」再发
         「积分」，第二条必然落在同一个冷却窗口里被拒，用户看到的就是
@@ -939,6 +1004,79 @@ class InteractionPlugin(Star):
         if len(self._cooldown) > _COOLDOWN_MAX:
             cutoff = now - max(cooldown * 10, 600)
             self._cooldown = {k: v for k, v in self._cooldown.items() if v >= cutoff}
+        return None
+
+    def _admin_bypass(self, event: AstrMessageEvent) -> bool:
+        """判断某条消息是否豁免功能次数限制。
+
+        群主 / 管理员（``event.is_admin()``）以及 WebUI 里配置的管理员 ID
+        不受限制 —— 他们需要能随时测试、调试玩法。普通玩家一律受限。
+
+        Args:
+            event: 消息事件。
+
+        Returns:
+            是否豁免。
+        """
+        if event.is_admin():
+            return True
+        admins = self._cfg("permission", "admin_ids", default=[])
+        if not isinstance(admins, (list, tuple, set)):
+            return False
+        uid = str(event.get_sender_id())
+        return any(str(a) == uid for a in admins)
+
+    def _usage_check(self, event: AstrMessageEvent, feature: str) -> str | None:
+        """检查并累加某功能当日的使用次数。
+
+        按 ``会话 + 用户 + 功能`` 计数，跨天自动清零。配置读取自
+        ``limits.<feature>.enabled`` / ``limits.<feature>.daily``：
+        - ``enabled=false`` 或 ``daily<=0`` → 不限制（默认，老配置行为不变）；
+        - 管理员（含 ``permission.admin_ids``）永远豁免，否则没法测试玩法。
+
+        赌博 / 回收型玩法（``GAMBLING_FEATURES``）在这里直接放行。
+
+        Args:
+            event: 消息事件。
+            feature: 功能键，对应 ``FEATURE_LABELS`` 与 schema 的 ``limits`` 子键。
+
+        Returns:
+            拒绝原因；放行返回 ``None``。
+        """
+        if not self._bool("limits", "enabled", default=True):
+            return None
+        if feature in GAMBLING_FEATURES or feature not in FEATURE_LABELS:
+            return None
+        if self._admin_bypass(event):
+            return None
+        if not self._bool("limits", feature, "enabled", default=True):
+            return None
+        cap = self._int("limits", feature, "daily", default=0)
+        if cap <= 0:  # 0 = 不限制
+            return None
+
+        key = self._session_key(event)
+        uid, _name = self._sender(event)
+        user = self.store.get_user(key, uid)
+        today = time.strftime("%Y-%m-%d")
+        if user.get("usage_date") != today:
+            counts: dict[str, int] = {}
+        else:
+            raw = user.get("usage_counts")
+            counts = (
+                {str(k): int(v or 0) for k, v in raw.items()}
+                if isinstance(raw, dict)
+                else {}
+            )
+        used = int(counts.get(feature, 0) or 0)
+        if used >= cap:
+            label = FEATURE_LABELS.get(feature, feature)
+            return (
+                f"「{label}」今天已经玩了 {used} 次，达到上限 {cap} 次啦，明天再来吧～"
+            )
+        counts[feature] = used + 1
+        user["usage_date"] = today
+        user["usage_counts"] = counts
         return None
 
     @staticmethod
@@ -1711,6 +1849,8 @@ class InteractionPlugin(Star):
         """每日签到领取积分。"""
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "sign"):
+            return self._deny(reason)
         if not self._feature_on("sign_in"):
             return self._deny("签到功能已关闭。")
         key = self._session_key(event)
@@ -1787,6 +1927,8 @@ class InteractionPlugin(Star):
             args: ``<目标用户> <数量>``，目标可用 ``@某人`` 或用户 ID。
         """
         if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if reason := self._usage_check(event, "transfer"):
             return self._deny(reason)
         raw = args.strip() or self._args(event).strip()
         target, rest = self._resolve_target(event, raw)
@@ -1897,6 +2039,8 @@ class InteractionPlugin(Star):
         """开始一局猜数字。"""
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "guess"):
+            return self._deny(reason)
         if not self._feature_on("guess_number"):
             return self._deny("猜数字功能已关闭。")
         key = self._session_key(event)
@@ -1979,6 +2123,8 @@ class InteractionPlugin(Star):
         """开始一局词语接龙，可带起始词。"""
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "chain"):
+            return self._deny(reason)
         if not self._feature_on("word_chain"):
             return self._deny("接龙功能已关闭。")
         key = self._session_key(event)
@@ -2058,6 +2204,8 @@ class InteractionPlugin(Star):
     ) -> MessageEventResult | None:
         """发起投票，用法：/投票 问题 | 选项1 | 选项2 ..."""
         if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if reason := self._usage_check(event, "vote"):
             return self._deny(reason)
         if not self._feature_on("vote"):
             return self._deny("投票功能已关闭。")
@@ -2207,6 +2355,8 @@ class InteractionPlugin(Star):
             args: ``<数量> <面数>`` 或 ``NdM``，可省略。
         """
         if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if reason := self._usage_check(event, "dice"):
             return self._deny(reason)
         if not self._feature_on("dice", default=False):
             return self._deny("掷骰子功能已关闭。")
@@ -2384,6 +2534,8 @@ class InteractionPlugin(Star):
         """查看每日任务进度。"""
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "quest"):
+            return self._deny(reason)
         key = self._session_key(event)
         uid, name = self._sender(event)
         user = self.store.get_user(key, uid)
@@ -2408,6 +2560,8 @@ class InteractionPlugin(Star):
     ) -> MessageEventResult | None:
         """领取每日任务奖励；不带参数时一键领取所有可领任务。"""
         if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if reason := self._usage_check(event, "claim"):
             return self._deny(reason)
         key = self._session_key(event)
         uid, name = self._sender(event)
@@ -2459,6 +2613,8 @@ class InteractionPlugin(Star):
             args: 可选，要检验的数字。
         """
         if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if reason := self._usage_check(event, "lucky"):
             return self._deny(reason)
         if not self._feature_on("lucky"):
             return self._deny("幸运数字已关闭。")
@@ -2514,6 +2670,8 @@ class InteractionPlugin(Star):
         """
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "eight_ball"):
+            return self._deny(reason)
         if not self._feature_on("eight_ball"):
             return self._deny("魔法八球已关闭。")
         q = args.strip() or self._args(event).strip()
@@ -2530,6 +2688,8 @@ class InteractionPlugin(Star):
             args: 可选，被扎心的对象（@某人 或 ID）。
         """
         if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if reason := self._usage_check(event, "roast"):
             return self._deny(reason)
         if not self._feature_on("roast"):
             return self._deny("扎心文案已关闭。")
@@ -2843,6 +3003,8 @@ class InteractionPlugin(Star):
         """出一道谜语让大家抢答。"""
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "riddle"):
+            return self._deny(reason)
         if not self._feature_on("riddle"):
             return self._deny("猜谜已关闭。")
         key = self._session_key(event)
@@ -2926,6 +3088,8 @@ class InteractionPlugin(Star):
         """
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "turtle_soup"):
+            return self._deny(reason)
         if not self._feature_on("turtle_soup"):
             return self._deny("海龟汤已关闭。")
         key = self._session_key(event)
@@ -2977,6 +3141,8 @@ class InteractionPlugin(Star):
             args: 可选目标词。
         """
         if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if reason := self._usage_check(event, "rush"):
             return self._deny(reason)
         if not self._feature_on("rush"):
             return self._deny("抢答已关闭。")
@@ -3037,6 +3203,8 @@ class InteractionPlugin(Star):
         """查看今日运势（同一天结果稳定）。"""
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "fortune"):
+            return self._deny(reason)
         if not self._feature_on("fortune"):
             return self._deny("运势功能已关闭。")
         key = self._session_key(event)
@@ -3066,6 +3234,8 @@ class InteractionPlugin(Star):
     ) -> MessageEventResult | None:
         """零成本挖矿：无次数限制、无入场费，奖励来自可配置矿场。"""
         if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if reason := self._usage_check(event, "mining"):
             return self._deny(reason)
         if not self._bool("mining", "enabled", default=True):
             return self._deny("挖矿场已关闭。")
@@ -3298,6 +3468,8 @@ class InteractionPlugin(Star):
         """
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "shop"):
+            return self._deny(reason)
         if not self._feature_on("shop"):
             return self._deny("商店已关闭。")
         if not self._bool("shop", "allow_buy", default=True):
@@ -3431,6 +3603,8 @@ class InteractionPlugin(Star):
         """
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "gift"):
+            return self._deny(reason)
         if not self._feature_on("social"):
             return self._deny("社交玩法已关闭。")
         raw = args.strip() or self._args(event).strip()
@@ -3530,6 +3704,8 @@ class InteractionPlugin(Star):
             args: ``@某人``。
         """
         if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if reason := self._usage_check(event, "confess"):
             return self._deny(reason)
         if not self._feature_on("social"):
             return self._deny("社交玩法已关闭。")
@@ -3844,6 +4020,9 @@ class InteractionPlugin(Star):
         """
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "tictactoe"):
+            return self._deny(reason)
+            return self._deny(reason)
         if not self._feature_on("tictactoe"):
             return self._deny("井字棋已关闭。")
         key = self._session_key(event)
@@ -3932,6 +4111,9 @@ class InteractionPlugin(Star):
         """
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "mine"):
+            return self._deny(reason)
+            return self._deny(reason)
         if not self._feature_on("mine"):
             return self._deny("扫雷已关闭。")
         key = self._session_key(event)
@@ -4016,6 +4198,8 @@ class InteractionPlugin(Star):
             args: 可选猜测数字串。
         """
         if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if reason := self._usage_check(event, "codebreaker"):
             return self._deny(reason)
         if not self._feature_on("codebreaker"):
             return self._deny("数字破解已关闭。")
@@ -4462,6 +4646,8 @@ class InteractionPlugin(Star):
         """转生：重置积分换取永久收益加成。"""
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "rebirth"):
+            return self._deny(reason)
         if not self._feature_on("rebirth_play", default=True):
             return self._deny("转生功能已关闭。")
         key = self._session_key(event)
@@ -4603,6 +4789,8 @@ class InteractionPlugin(Star):
         """
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "boss"):
+            return self._deny(reason)
         if not self._feature_on("boss", default=True):
             return self._deny("群 Boss 战已关闭。")
         key = self._session_key(event)
@@ -4700,6 +4888,8 @@ class InteractionPlugin(Star):
             args: 可选打法（强攻 / 消耗 / 破甲 / 封印）。
         """
         if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if reason := self._usage_check(event, "boss"):
             return self._deny(reason)
         if not self._feature_on("boss", default=True):
             return self._deny("群 Boss 战已关闭。")
@@ -4882,6 +5072,9 @@ class InteractionPlugin(Star):
         """查看本季赛季进度与预计奖励。"""
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "season"):
+            return self._deny(reason)
+            return self._deny(reason)
         key = self._session_key(event)
         uid, name = self._sender(event)
         user = self.store.get_user(key, uid)
@@ -5002,6 +5195,8 @@ class InteractionPlugin(Star):
         """领养 / 查看宠物。"""
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "pet"):
+            return self._deny(reason)
         if not self._feature_on("pet", default=True):
             return self._deny("宠物玩法已关闭。")
         key = self._session_key(event)
@@ -5033,6 +5228,8 @@ class InteractionPlugin(Star):
     ) -> MessageEventResult | None:
         """照料宠物一次（有冷却）。"""
         if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if reason := self._usage_check(event, "pet"):
             return self._deny(reason)
         if not self._feature_on("pet", default=True):
             return self._deny("宠物玩法已关闭。")
@@ -5081,6 +5278,8 @@ class InteractionPlugin(Star):
         """
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "pet"):
+            return self._deny(reason)
         key = self._session_key(event)
         uid, name = self._sender(event)
         user = self.store.get_user(key, uid)
@@ -5111,6 +5310,8 @@ class InteractionPlugin(Star):
         """
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "random"):
+            return self._deny(reason)
         raw = args.strip() or self._args(event).strip()
         if not raw:
             return event.plain_result("用法：随机 火锅|烧烤|日料")
@@ -5129,6 +5330,8 @@ class InteractionPlugin(Star):
     ) -> MessageEventResult | None:
         """来一条冷笑话。"""
         if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if reason := self._usage_check(event, "joke"):
             return self._deny(reason)
         return event.plain_result("😂 " + games_extra.random_joke(self._rng))
 
@@ -5593,6 +5796,8 @@ class InteractionPlugin(Star):
         """
         if reason := self._guard(event, self._current_command(event)):
             return self._deny(reason)
+        if reason := self._usage_check(event, "quiz"):
+            return self._deny(reason)
         if not self._feature_on("quiz"):
             return self._deny("知识竞速已关闭。")
         key = self._session_key(event)
@@ -5720,6 +5925,8 @@ class InteractionPlugin(Star):
         不发放额外积分，避免又多一条刷分路径。
         """
         if reason := self._guard(event, self._current_command(event)):
+            return self._deny(reason)
+        if reason := self._usage_check(event, "squad"):
             return self._deny(reason)
         key = self._session_key(event)
         uid, name = self._sender(event)
